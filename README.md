@@ -37,15 +37,10 @@ claude --version
 
 只需安装实际使用的 coding agent。
 
-## 安装与初始化
+## 一键安装与初始化
 
 ```bash
-git clone https://github.com/YeFeng-Silence/lark-coding-assistant.git
-cd lark-coding-assistant
-npm install
-npm run build
-npm link
-lark-coding-assistant init
+npm install -g lark-coding-assistant@latest && lark-coding-assistant init
 ```
 
 初始化向导会让你选择飞书或 Lark，并显示 PersonalAgent 注册二维码：
@@ -251,11 +246,7 @@ agent 正在审批、本地输入框已有草稿或画面未知时，普通消�
 ## 升级与卸载
 
 ```bash
-cd lark-coding-assistant
-git pull --ff-only
-npm install
-npm run build
-npm link
+npm install -g lark-coding-assistant@latest
 lark-coding-assistant daemon restart
 ```
 
@@ -264,7 +255,7 @@ lark-coding-assistant daemon restart
 卸载：
 
 ```bash
-npm unlink -g lark-coding-assistant
+npm uninstall -g lark-coding-assistant
 ```
 
 ## 数据目录
@@ -318,9 +309,20 @@ npm run build
 npm link
 ```
 
-发布前更新 `package.json` 版本号并提交。发布命令会执行校验并发布到 npm registry：
+源码安装：
 
 ```bash
+git clone https://github.com/YeFeng-Silence/lark-coding-assistant.git
+cd lark-coding-assistant
+npm install
+npm run build
+npm link
+```
+
+发布前更新 `package.json` 和 `package-lock.json` 的版本号并提交。确认已登录公共 npm registry 后再发布：
+
+```bash
+npm whoami --registry=https://registry.npmjs.org
 npm publish
 ```
 
