@@ -1,0 +1,2 @@
+TraeCode CLI (v0.201.1)
+fatal error: unable to initialize runtime

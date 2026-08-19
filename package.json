@@ -1,0 +1,55 @@
+{
+  "name": "lark-coding-assistant",
+  "version": "0.1.1",
+  "description": "Control local coding-agent CLI sessions from Feishu or Lark",
+  "type": "module",
+  "bin": {
+    "lark-coding-assistant": "bin/lark-coding-assistant.mjs",
+    "lark-coding-assistant-hook": "bin/lark-coding-assistant-hook.mjs"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "dev": "tsx src/cli.ts",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.4.0",
+    "@larksuite/channel": "^0.4.1",
+    "commander": "^12.1.0",
+    "qrcode-terminal": "^0.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/qrcode-terminal": "^0.12.2",
+    "tsx": "^4.20.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.6.3",
+    "vitest": "^4.1.11"
+  },
+  "engines": {
+    "node": ">=20.12.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YeFeng-Silence/lark-coding-assistant.git"
+  },
+  "bugs": {
+    "url": "https://github.com/YeFeng-Silence/lark-coding-assistant/issues"
+  },
+  "homepage": "https://github.com/YeFeng-Silence/lark-coding-assistant#readme",
+  "author": "YeFeng-Silence",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,9 @@
+Would you like to run the following command?
+Reason: Run a harmless ruby probe command
+$ ruby -e "puts :approval_probe"
+❯ 1. Yes, proceed (y)
+  2. Yes, switch this session to auto mode (r)
+  3. Yes, switch this session to full access mode (f)
+  4. Yes, and don't ask again for commands that start with ruby (p)
+  5. No, and tell TraeCode CLI what to do differently (esc)
+Press enter to confirm or esc to cancel

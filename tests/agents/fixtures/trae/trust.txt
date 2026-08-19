@@ -1,0 +1,5 @@
+You are in /tmp/project
+Do you trust the contents of this directory?
+❯ 1. Yes, continue
+  2. No, exit
+Press enter to continue

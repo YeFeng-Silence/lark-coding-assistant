@@ -1,0 +1,3 @@
+TraeCode CLI (v0.201.1)
+Thinking about the requested changes
+esc to interrupt
