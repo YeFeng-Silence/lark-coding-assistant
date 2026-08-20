@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { runFile, runFileWithInput } from '../platform/process.js';
 import { assertSafeTmuxTarget, sanitizeRemoteInput, shellQuote } from './input.js';
 import type { TmuxCreateOptions, TmuxPane } from './types.js';
+import { AppError } from '../core/errors.js';
 
 const PANE_FORMAT = '#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_dead}\t#{cursor_x}\t#{cursor_y}';
 
@@ -16,10 +17,18 @@ export class TmuxController {
 
   async create(options: TmuxCreateOptions): Promise<TmuxPane> {
     if (!/^[a-zA-Z0-9_-]{1,64}$/.test(options.sessionName)) {
-      throw new Error('tmux session name must contain only letters, digits, underscore, or dash');
+      throw new AppError(
+        'INVALID_SESSION_NAME',
+        'tmux session name must contain only letters, digits, underscore, or dash',
+        { sessionId: options.sessionName },
+      );
     }
     if (await this.hasSession(options.sessionName)) {
-      throw new Error(`tmux session already exists: ${options.sessionName}`);
+      throw new AppError(
+        'SESSION_EXISTS',
+        `tmux session already exists: ${options.sessionName}`,
+        { sessionId: displaySessionId(options.sessionName) },
+      );
     }
     const environment = Object.entries(options.env ?? {}).map(([key, value]) => {
       if (!/^[A-Z][A-Z0-9_]*$/.test(key)) throw new Error(`unsafe tmux environment key: ${key}`);
@@ -104,6 +113,10 @@ export class TmuxController {
   async killSession(sessionName: string): Promise<void> {
     await runFile(this.binary, ['kill-session', '-t', `=${sessionName}`]);
   }
+}
+
+function displaySessionId(sessionName: string): string {
+  return sessionName.replace(/^lark-coding-assistant-/, '');
 }
 
 function parsePane(line: string): TmuxPane | undefined {

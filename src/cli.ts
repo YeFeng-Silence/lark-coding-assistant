@@ -17,6 +17,9 @@ import { getAgentAdapter, isAgentId } from './agents/registry.js';
 import type { AgentId, ResumeOptions } from './agents/types.js';
 import { daemonInfo, startDaemonProcess, stopDaemonProcess } from './daemon/lifecycle.js';
 import { registrationDomains } from './lark/registration.js';
+import { AppError, systemErrorCode } from './core/errors.js';
+import { cliDebugEnabled, formatCliError, withCliOperation } from './cli-errors.js';
+import type { DaemonRequestInput, DaemonResult } from './daemon/protocol.js';
 
 const program = new Command();
 const paths = resolveAppPaths();
@@ -48,7 +51,13 @@ daemonCommand.command('stop').description('Stop the bridge daemon without stoppi
 daemonCommand.command('restart').description('Restart the bridge daemon without stopping coding-agent sessions').action(runDaemonRestart);
 daemonCommand.command('status').description('Show bridge daemon status and version').action(runDaemonStatus);
 
-await program.parseAsync();
+try {
+  await program.parseAsync();
+} catch (error) {
+  const cliError = withCliOperation(error, commandOperation(process.argv));
+  process.stderr.write(`${formatCliError(cliError, cliDebugEnabled())}\n`);
+  process.exitCode = 1;
+}
 
 async function runInit(): Promise<void> {
   await store.ensure();
@@ -124,15 +133,15 @@ interface StartOptions extends ResumeOptions {
 async function runStart(options: StartOptions): Promise<void> {
   const cwd = resolve(options.cwd ?? process.cwd());
   const resume = resolveResumeOption(options);
-  await access(cwd);
+  await access(cwd).catch((error) => {
+    throw new AppError('INVALID_CWD', `working directory is unavailable: ${cwd}`, { cwd }, { cause: error });
+  });
   await ensureInitialized();
   await preflight(options.agent);
   await ensureDaemon();
-  const response = await requestDaemon(paths.socket, {
+  const value = await daemonValue<StartSessionValue>({
     method: 'start', cwd, sessionId: options.name, agent: options.agent, resume,
   });
-  if (!response.ok) throw new Error(response.error);
-  const value = response.value as StartSessionValue;
   if (value.binding.mode === 'reused') {
     console.log('\n已自动沿用原有飞书/Lark 私聊绑定。\n');
   } else if (value.binding.mode === 'awaiting-owner-message') {
@@ -162,9 +171,7 @@ async function runAttach(name: string): Promise<void> {
 async function runBindCode(): Promise<void> {
   await ensureInitialized();
   await ensureDaemon();
-  const response = await requestDaemon(paths.socket, { method: 'bindCode' });
-  if (!response.ok) throw new Error(response.error);
-  const value = response.value as { bindCode: string; expiresInSeconds: number };
+  const value = await daemonValue<{ bindCode: string; expiresInSeconds: number }>({ method: 'bindCode' });
   console.log(`飞书/Lark 私聊绑定命令（${value.expiresInSeconds / 60} 分钟有效）：`);
   console.log(`/attach ${value.bindCode}`);
 }
@@ -173,11 +180,31 @@ async function attachLocal(name: string): Promise<void> {
   const state = await store.loadState();
   const config = await store.loadConfig();
   const session = state.sessions?.[name];
-  if (!session) throw new Error(`no managed session: ${name}`);
-  if (!config) throw new Error('not initialized');
+  if (!session) throw new AppError('SESSION_NOT_FOUND', `no managed session: ${name}`, { sessionId: name });
+  if (!config) throw new AppError('NOT_INITIALIZED', 'not initialized');
+  try {
+    await runFile(config.tmuxBinary, ['has-session', '-t', `=${session.sessionName}`]);
+  } catch (error) {
+    if (systemErrorCode(error) === 'ENOENT') {
+      throw new AppError('BINARY_NOT_FOUND', `command not found: ${config.tmuxBinary}`, {
+        binary: config.tmuxBinary,
+      }, { cause: error });
+    }
+    throw new AppError('SESSION_NOT_FOUND', `managed session is no longer running: ${name}`, {
+      sessionId: name,
+    }, { cause: error });
+  }
   const child = spawn(config.tmuxBinary, ['attach-session', '-t', `=${session.sessionName}`], { stdio: 'inherit' });
   const code = await new Promise<number | null>((resolveExit, reject) => {
-    child.once('error', reject);
+    child.once('error', (error) => {
+      if (systemErrorCode(error) === 'ENOENT') {
+        reject(new AppError('BINARY_NOT_FOUND', `command not found: ${config.tmuxBinary}`, {
+          binary: config.tmuxBinary,
+        }, { cause: error }));
+        return;
+      }
+      reject(error);
+    });
     child.once('exit', resolveExit);
   });
   if (code && code !== 0) process.exitCode = code;
@@ -195,14 +222,12 @@ async function runStatus(name?: string): Promise<void> {
 }
 
 async function runStop(name?: string): Promise<void> {
-  const response = await requestDaemon(paths.socket, { method: 'stop', sessionId: name });
-  if (!response.ok) throw new Error(response.error);
+  await daemonValue({ method: 'stop', sessionId: name });
   console.log(`Coding-agent tmux session stopped${name ? `: ${name}` : '.'}`);
 }
 
 async function runResetOwner(): Promise<void> {
-  const response = await requestDaemon(paths.socket, { method: 'resetOwner' });
-  if (!response.ok) throw new Error(response.error);
+  await daemonValue({ method: 'resetOwner' });
   console.log('Owner cleared.');
 }
 
@@ -253,7 +278,7 @@ async function runDaemonStatus(): Promise<void> {
 
 async function ensureInitialized(): Promise<void> {
   if (!await store.loadConfig() || !await store.loadSecrets()) {
-    throw new Error('not initialized; run lark-coding-assistant init first');
+    throw new AppError('NOT_INITIALIZED', 'not initialized; run lark-coding-assistant init first');
   }
 }
 
@@ -261,13 +286,17 @@ async function preflight(agentId: AgentId): Promise<void> {
   const config = (await store.loadConfig())!;
   const adapter = getAgentAdapter(agentId);
   await Promise.all([
-    runFile(config.tmuxBinary, ['-V']),
-    runFile(adapter.binary(config), [...adapter.versionArgs]),
+    preflightBinary(config.tmuxBinary, ['-V']),
+    preflightBinary(adapter.binary(config), [...adapter.versionArgs]),
   ]);
 }
 
 function parseAgentId(value: string): AgentId {
-  if (!isAgentId(value)) throw new Error(`unsupported coding agent: ${value}`);
+  if (!isAgentId(value)) {
+    throw new AppError('INVALID_OPTIONS', `unsupported coding agent: ${value}`, {
+      reason: `不支持 coding agent「${value}」`,
+    });
+  }
   return value;
 }
 
@@ -283,4 +312,33 @@ async function ensureDaemon(): Promise<void> {
 
 function daemonEntryPath(): string {
   return fileURLToPath(new URL('./daemon-entry.js', import.meta.url));
+}
+
+async function daemonValue<T = unknown>(request: DaemonRequestInput): Promise<T> {
+  const response = await requestDaemon(paths.socket, request);
+  if (!response.ok) throw daemonResultError(response);
+  return response.value as T;
+}
+
+function daemonResultError(response: Extract<DaemonResult, { ok: false }>): AppError {
+  return new AppError(
+    response.errorCode ?? 'UNKNOWN',
+    response.error,
+    response.errorContext ?? {},
+  );
+}
+
+async function preflightBinary(binary: string, args: string[]): Promise<void> {
+  try {
+    await runFile(binary, args);
+  } catch (error) {
+    if (systemErrorCode(error) === 'ENOENT') {
+      throw new AppError('BINARY_NOT_FOUND', `command not found: ${binary}`, { binary }, { cause: error });
+    }
+    throw error;
+  }
+}
+
+function commandOperation(argv: string[]): string | undefined {
+  return argv.slice(2).find((argument) => !argument.startsWith('-'));
 }

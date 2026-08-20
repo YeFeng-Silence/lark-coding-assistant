@@ -1,6 +1,7 @@
 import type { ScreenDetection } from '../screen/detector.js';
 import type { ManagedSession, SessionState } from '../core/model.js';
 import type { AgentId, AgentResume, TurnCompleteCandidate } from '../agents/types.js';
+import type { AppErrorCode, ErrorContext } from '../core/errors.js';
 
 export type DaemonRequest =
   | { id: string; method: 'ping' }
@@ -24,7 +25,7 @@ export type DaemonRequestInput = DaemonRequest extends infer Request
 
 export type DaemonResult =
   | { ok: true; value?: unknown }
-  | { ok: false; error: string };
+  | { ok: false; error: string; errorCode?: AppErrorCode; errorContext?: ErrorContext };
 
 export interface DaemonInfo {
   version: string;

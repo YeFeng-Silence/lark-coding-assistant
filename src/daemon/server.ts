@@ -7,6 +7,7 @@ import { tailScreen } from '../screen/normalize.js';
 import { AppStore, createBindCode, hashBindCode } from '../core/store.js';
 import type { AppConfig, ManagedSession, SessionState } from '../core/model.js';
 import type { AppPaths } from '../core/paths.js';
+import { AppError, serializeAppError } from '../core/errors.js';
 import { TmuxController } from '../tmux/controller.js';
 import type { DaemonRequest, DaemonResult, RuntimeStatus } from './protocol.js';
 import { getAgentAdapter } from '../agents/registry.js';
@@ -189,10 +190,20 @@ export class AssistantDaemon {
     agentId: AgentId,
     resume?: AgentResume,
   ): Promise<DaemonResult> {
-    if (!validSessionId(sessionId)) return { ok: false, error: 'session name must use letters, digits, underscore, or dash' };
+    if (!validSessionId(sessionId)) {
+      return fail(new AppError(
+        'INVALID_SESSION_NAME',
+        'session name must use letters, digits, underscore, or dash',
+        { sessionId },
+      ));
+    }
     const existing = this.state.sessions?.[sessionId];
     if (existing && await this.tmux.inspect(existing.paneId)) {
-      return { ok: false, error: `managed coding-agent session is already running: ${sessionId}` };
+      return fail(new AppError(
+        'SESSION_EXISTS',
+        `managed coding-agent session is already running: ${sessionId}`,
+        { sessionId },
+      ));
     }
     const becomesActive = !this.state.activeSessionId;
     if (becomesActive) {
@@ -990,9 +1001,13 @@ export class AssistantDaemon {
   }
 
   private async stopSession(sessionId = this.state.activeSessionId): Promise<DaemonResult> {
-    if (!sessionId) return { ok: false, error: 'no active managed session' };
+    if (!sessionId) {
+      return fail(new AppError('SESSION_NOT_FOUND', 'no active managed session', { sessionId: 'default' }));
+    }
     const session = this.state.sessions?.[sessionId];
-    if (!session) return { ok: false, error: `unknown session: ${sessionId}` };
+    if (!session) {
+      return fail(new AppError('SESSION_NOT_FOUND', `unknown session: ${sessionId}`, { sessionId }));
+    }
     if (await this.tmux.hasSession(session.sessionName)) {
       await this.tmux.killSession(session.sessionName);
     }
@@ -1292,7 +1307,7 @@ export class AssistantDaemon {
 }
 
 function fail(error: unknown): DaemonResult {
-  return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  return { ok: false, ...serializeAppError(error) };
 }
 
 function errorMessage(error: unknown): string {

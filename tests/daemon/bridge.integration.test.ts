@@ -81,6 +81,16 @@ rl.on('line', (line) => {
     const started = await requestDaemon(paths.socket, { method: 'start', cwd: root, sessionId: 'default', agent: 'codex' });
     expect(started.ok).toBe(true);
     expect((started as { ok: true; value: { binding: { mode: string } } }).value.binding.mode).toBe('awaiting-owner-message');
+    const duplicateStart = await requestDaemon(paths.socket, {
+      method: 'start', cwd: root, sessionId: 'default', agent: 'codex',
+    });
+    expect(duplicateStart).toEqual({
+      ok: false,
+      error: 'managed coding-agent session is already running: default',
+      errorCode: 'SESSION_EXISTS',
+      errorContext: { sessionId: 'default' },
+    });
+    expect(JSON.stringify(duplicateStart)).not.toContain('at AssistantDaemon');
 
     await fake.emit(message('hello from lark'));
     expect(fake.texts.at(-1)?.text).toContain('已自动连接');

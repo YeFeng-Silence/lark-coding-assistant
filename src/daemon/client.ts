@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { createConnection } from 'node:net';
 import type { DaemonRequestInput, DaemonResult } from './protocol.js';
+import { AppError, systemErrorCode } from '../core/errors.js';
 
 export function requestDaemon(
   socketPath: string,
@@ -13,7 +14,7 @@ export function requestDaemon(
     let buffer = '';
     const timer = setTimeout(() => {
       socket.destroy();
-      reject(new Error('daemon request timed out'));
+      reject(new AppError('REQUEST_TIMEOUT', 'daemon request timed out'));
     }, timeoutMs);
     socket.setEncoding('utf8');
     socket.once('connect', () => socket.write(`${JSON.stringify({ ...request, id })}\n`));
@@ -31,6 +32,11 @@ export function requestDaemon(
     });
     socket.once('error', (error) => {
       clearTimeout(timer);
+      const code = systemErrorCode(error);
+      if (code === 'ENOENT' || code === 'ECONNREFUSED' || code === 'ECONNRESET' || code === 'EPIPE') {
+        reject(new AppError('DAEMON_UNAVAILABLE', 'unable to connect to daemon', {}, { cause: error }));
+        return;
+      }
       reject(error);
     });
   });

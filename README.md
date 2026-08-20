@@ -271,6 +271,25 @@ npm uninstall -g lark-coding-assistant
 
 daemon 的常规日志、stdout、stderr 和启动崩溃都会写入 `logs/assistant.log`。
 
+## 错误与调试
+
+CLI 默认只显示简洁的中文错误和可执行的解决建议，不会把 Node.js 堆栈、源码路径或内部异常直接输出到终端。例如 session 已经运行时，可以按提示连接现有 session 或换一个名称。
+
+查看 daemon 状态和日志：
+
+```bash
+lark-coding-assistant daemon status
+lark-coding-assistant logs
+```
+
+需要排查未知异常时，可以只为当前命令开启调试输出：
+
+```bash
+LARK_CODING_ASSISTANT_DEBUG=1 lark-coding-assistant <command>
+```
+
+调试模式会在友好提示后追加原始错误堆栈，请勿把可能包含本机路径或环境信息的完整输出直接发布到公开渠道。
+
 ## 常见问题
 
 ### 飞书消息进入了错误的 session
