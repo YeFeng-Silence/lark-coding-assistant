@@ -37,6 +37,18 @@ claude --version
 
 只需安装实际使用的 coding agent。
 
+### 推荐的 coding agent 版本
+
+以下版本已完成 Stop hook、任务通知、审批、Question、单选/多选和手动遥控回归，建议优先使用：
+
+| Coding agent | 推荐版本 | 版本命令 |
+| --- | --- | --- |
+| Codex CLI | `0.148.0` | `codex --version` |
+| Trae CLI | `0.201.4` | `trae-cli --version` |
+| Claude Code | `2.1.237` | `claude --version` |
+
+这些是已验证的推荐版本，不是强制版本锁定。其他版本通常也可以运行；如果新版调整了 TUI 文案或按键交互，结构化卡片可能暂时无法识别，此时仍可通过 `/tail` 和手动遥控模式完成操作。
+
 ## 一键安装与初始化
 
 ```bash
