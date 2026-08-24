@@ -208,6 +208,8 @@ lca daemon restart
 
 `daemon stop/restart` 只断开或恢复飞书连接，不停止受管 tmux session。顶层 `stop [name]` 才会停止对应 agent 和 tmux session。
 
+`lca status` 会先显示 daemon 状态，再用一个表格列出全部 session；session 按 `codex`、`traex`、`claude` 分组排序，每个 session 占一行，当前连接使用 `●` 标记。表格同时显示终端状态、tmux 状态和绝对工作目录。使用 `lca status <name>` 可只查看指定 session；daemon 不可用时仍会读取本地状态，并将无法确认的运行信息明确标出。
+
 ## 绑定规则
 
 首次扫码会保存可信 owner。后续启动会自动沿用该 owner 和私聊，通常不再需要绑定码。

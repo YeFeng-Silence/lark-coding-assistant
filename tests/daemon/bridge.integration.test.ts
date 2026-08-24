@@ -141,7 +141,11 @@ rl.on('line', (line) => {
     await fake.emit(message(`/attach ${bindCode}`));
     expect(fake.texts.at(-1)?.text).toContain('绑定成功');
     await fake.emit(message('/status'));
-    expect(fake.statuses.at(-1)).toMatchObject({ session: { id: 'default', agent: 'codex' }, paneAlive: true });
+    expect(fake.statuses.at(-1)).toMatchObject({
+      session: { id: 'default', agent: 'codex' },
+      paneAlive: true,
+      sessions: [{ session: { id: 'default', agent: 'codex' }, paneAlive: true, active: true }],
+    });
     await fake.emit(message('/manual'));
     expect(fake.manualViews.at(-1)).toMatchObject({ session: { id: 'default' }, state: 'active' });
     await fake.emit(message('/type manual-'));

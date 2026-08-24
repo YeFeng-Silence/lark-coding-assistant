@@ -13,7 +13,7 @@ import { sessionStartupFailure } from '../session/startup-failure.js';
 import { SessionReconciler } from '../session/reconciler.js';
 import { resolveNativeAgentSessionId } from '../session/native-session.js';
 import { TmuxController } from '../tmux/controller.js';
-import type { DaemonRequest, DaemonResult, RuntimeStatus } from './protocol.js';
+import type { DaemonRequest, DaemonResult, RuntimeSessionStatus, RuntimeStatus } from './protocol.js';
 import { getAgentAdapter } from '../agents/registry.js';
 import type { AgentId, AgentResume, AgentSessionStartedCandidate, TurnCompleteCandidate } from '../agents/types.js';
 import { validSessionStartCandidate, validTurnCompleteCandidate } from '../agents/stop-event.js';
@@ -373,10 +373,49 @@ export class AssistantDaemon {
     return { mode: 'code', bindCode: createBindCode(), expiresInSeconds: 600 };
   }
 
-  private async runtimeStatus(sessionId = this.state.activeSessionId): Promise<RuntimeStatus> {
-    const session = sessionId ? this.state.sessions?.[sessionId] : undefined;
-    const pane = session ? await this.tmux.inspect(session.paneId) : undefined;
-    return { state: this.state, session, screen: sessionId === this.state.activeSessionId ? this.screen : undefined, paneAlive: Boolean(pane && !pane.dead) };
+  private async runtimeStatus(sessionId?: string): Promise<RuntimeStatus> {
+    const selectedSessionId = sessionId ?? this.state.activeSessionId;
+    const selected = selectedSessionId ? this.state.sessions?.[selectedSessionId] : undefined;
+    const requestedSessions = sessionId
+      ? (selected ? [selected] : [])
+      : Object.values(this.state.sessions ?? {});
+    const sessions = await Promise.all(requestedSessions.map((session) => this.sessionRuntimeStatus(session)));
+    const selectedRuntime = selected
+      ? sessions.find(({ session }) => session.id === selected.id)
+        ?? await this.sessionRuntimeStatus(selected)
+      : undefined;
+    return {
+      state: this.state,
+      session: selected,
+      screen: selectedRuntime?.screen,
+      paneAlive: selectedRuntime?.paneAlive === true,
+      sessions,
+    };
+  }
+
+  private async sessionRuntimeStatus(session: ManagedSession): Promise<RuntimeSessionStatus> {
+    const active = session.id === this.state.activeSessionId;
+    try {
+      const pane = await this.tmux.inspect(session.paneId);
+      if (!pane || pane.dead) {
+        return {
+          session,
+          screen: getAgentAdapter(session.agent).detectScreen('', false),
+          paneAlive: false,
+          active,
+        };
+      }
+      const screen = active && this.screen
+        ? this.screen
+        : getAgentAdapter(session.agent).detectScreen(
+          await this.tmux.capture(session.paneId, 160),
+          true,
+          { x: pane.cursorX, y: pane.cursorY },
+        );
+      return { session, screen, paneAlive: true, active };
+    } catch {
+      return { session, active };
+    }
   }
 
   private async tail(lines: number): Promise<string> {
