@@ -10,6 +10,9 @@ const mocks = vi.hoisted(() => {
     listeners,
     send: vi.fn(async () => ({ messageId: 'om_form' })),
     updateCard: vi.fn(async () => undefined),
+    addReaction: vi.fn(async () => 'reaction_1'),
+    removeReaction: vi.fn(async () => undefined),
+    removeReactionByEmoji: vi.fn(async () => true),
     connect: vi.fn(async () => undefined),
     disconnect: vi.fn(async () => undefined),
   };
@@ -20,6 +23,9 @@ vi.mock('@larksuite/channel', () => ({
     on: (name: string, listener: (event: unknown) => unknown) => mocks.listeners.set(name, listener),
     send: mocks.send,
     updateCard: mocks.updateCard,
+    addReaction: mocks.addReaction,
+    removeReaction: mocks.removeReaction,
+    removeReactionByEmoji: mocks.removeReactionByEmoji,
     connect: mocks.connect,
     disconnect: mocks.disconnect,
   }),
@@ -30,6 +36,143 @@ describe('LarkGateway form callbacks', () => {
     mocks.send.mockClear();
     mocks.updateCard.mockClear();
     mocks.updateCard.mockResolvedValue(undefined);
+    mocks.addReaction.mockClear();
+    mocks.addReaction.mockResolvedValue('reaction_1');
+    mocks.removeReaction.mockClear();
+    mocks.removeReaction.mockResolvedValue(undefined);
+    mocks.removeReactionByEmoji.mockClear();
+    mocks.removeReactionByEmoji.mockResolvedValue(true);
+  });
+
+  it('adds Typing for an ordinary message and removes it before the next outbound message', async () => {
+    const { LarkGateway } = await import('../../src/lark/gateway.js');
+    const gateway = new LarkGateway(
+      {
+        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100,
+        agentBinaries: { codex: 'codex', 'traex': 'traex', 'claude': 'claude' },
+      },
+      { appSecret: 'secret', callbackSecret: 'callback' },
+      { onMessage: async () => undefined, onAction: async () => ({ type: 'success', content: 'ok' }) },
+    );
+
+    await gateway.startProcessing({ messageId: 'om_user', chatId: 'oc_1' } as NormalizedMessage);
+    expect(mocks.addReaction).toHaveBeenCalledWith('om_user', 'Typing');
+
+    await gateway.sendText('oc_1', 'done');
+    expect(mocks.removeReaction).toHaveBeenCalledWith('om_user', 'reaction_1');
+    expect(mocks.removeReaction.mock.invocationCallOrder[0]).toBeLessThan(mocks.send.mock.invocationCallOrder.at(-1) as number);
+  });
+
+  it('moves Typing to the latest ordinary message in the same chat', async () => {
+    mocks.addReaction.mockResolvedValueOnce('reaction_old').mockResolvedValueOnce('reaction_new');
+    const { LarkGateway } = await import('../../src/lark/gateway.js');
+    const gateway = new LarkGateway(
+      {
+        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100,
+        agentBinaries: { codex: 'codex', 'traex': 'traex', 'claude': 'claude' },
+      },
+      { appSecret: 'secret', callbackSecret: 'callback' },
+      { onMessage: async () => undefined, onAction: async () => ({ type: 'success', content: 'ok' }) },
+    );
+
+    await gateway.startProcessing({ messageId: 'om_old', chatId: 'oc_1' } as NormalizedMessage);
+    await gateway.startProcessing({ messageId: 'om_new', chatId: 'oc_1' } as NormalizedMessage);
+
+    expect(mocks.removeReaction).toHaveBeenCalledWith('om_old', 'reaction_old');
+    expect(mocks.addReaction).toHaveBeenLastCalledWith('om_new', 'Typing');
+  });
+
+  it('keeps Typing while only an existing card is updated', async () => {
+    const { LarkGateway } = await import('../../src/lark/gateway.js');
+    const gateway = new LarkGateway(
+      {
+        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100,
+        agentBinaries: { codex: 'codex', 'traex': 'traex', 'claude': 'claude' },
+      },
+      { appSecret: 'secret', callbackSecret: 'callback' },
+      { onMessage: async () => undefined, onAction: async () => ({ type: 'success', content: 'ok' }) },
+    );
+    await gateway.startProcessing({ messageId: 'om_user', chatId: 'oc_1' } as NormalizedMessage);
+    await gateway.completeChoiceInput('om_card', {
+      v: 1, kind: 'choice', interactionKind: 'question', agent: 'claude', action: '1', paneId: '%1',
+      fingerprint: 'fp', chatId: 'oc_1', nonce: 'nonce', expiresAt: Date.now() + 60_000, sig: 'sig',
+    }, 'done');
+
+    expect(mocks.removeReaction).not.toHaveBeenCalled();
+  });
+
+  it('removes Typing after ten minutes without an outbound message', async () => {
+    vi.useFakeTimers();
+    try {
+      const { LarkGateway } = await import('../../src/lark/gateway.js');
+      const gateway = new LarkGateway(
+        {
+          tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100,
+          agentBinaries: { codex: 'codex', 'traex': 'traex', 'claude': 'claude' },
+        },
+        { appSecret: 'secret', callbackSecret: 'callback' },
+        { onMessage: async () => undefined, onAction: async () => ({ type: 'success', content: 'ok' }) },
+      );
+
+      await gateway.startProcessing({ messageId: 'om_user', chatId: 'oc_1' } as NormalizedMessage);
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+
+      expect(mocks.removeReaction).toHaveBeenCalledWith('om_user', 'reaction_1');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not fail message processing when adding Typing fails', async () => {
+    mocks.addReaction.mockRejectedValueOnce(new Error('reaction unavailable'));
+    const { LarkGateway } = await import('../../src/lark/gateway.js');
+    const gateway = new LarkGateway(
+      {
+        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100,
+        agentBinaries: { codex: 'codex', 'traex': 'traex', 'claude': 'claude' },
+      },
+      { appSecret: 'secret', callbackSecret: 'callback' },
+      { onMessage: async () => undefined, onAction: async () => ({ type: 'success', content: 'ok' }) },
+    );
+
+    await expect(gateway.startProcessing({ messageId: 'om_user', chatId: 'oc_1' } as NormalizedMessage)).resolves.toBeUndefined();
+  });
+
+  it('falls back to removing Typing by emoji when exact removal fails', async () => {
+    mocks.removeReaction.mockRejectedValueOnce(new Error('reaction id expired'));
+    const { LarkGateway } = await import('../../src/lark/gateway.js');
+    const gateway = new LarkGateway(
+      {
+        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100,
+        agentBinaries: { codex: 'codex', 'traex': 'traex', 'claude': 'claude' },
+      },
+      { appSecret: 'secret', callbackSecret: 'callback' },
+      { onMessage: async () => undefined, onAction: async () => ({ type: 'success', content: 'ok' }) },
+    );
+
+    await gateway.startProcessing({ messageId: 'om_user', chatId: 'oc_1' } as NormalizedMessage);
+    await gateway.sendText('oc_1', 'done');
+
+    expect(mocks.removeReactionByEmoji).toHaveBeenCalledWith('om_user', 'Typing');
+    expect(mocks.send).toHaveBeenCalledWith('oc_1', { text: 'done' });
+  });
+
+  it('removes pending Typing before disconnecting', async () => {
+    const { LarkGateway } = await import('../../src/lark/gateway.js');
+    const gateway = new LarkGateway(
+      {
+        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100,
+        agentBinaries: { codex: 'codex', 'traex': 'traex', 'claude': 'claude' },
+      },
+      { appSecret: 'secret', callbackSecret: 'callback' },
+      { onMessage: async () => undefined, onAction: async () => ({ type: 'success', content: 'ok' }) },
+    );
+
+    await gateway.startProcessing({ messageId: 'om_user', chatId: 'oc_1' } as NormalizedMessage);
+    await gateway.disconnect();
+
+    expect(mocks.removeReaction).toHaveBeenCalledWith('om_user', 'reaction_1');
+    expect(mocks.removeReaction.mock.invocationCallOrder[0]).toBeLessThan(mocks.disconnect.mock.invocationCallOrder.at(-1) as number);
   });
 
   it('replaces an expired card with a persistent recovery hint', async () => {

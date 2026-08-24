@@ -62,6 +62,7 @@ export type LarkActionResult =
 export interface RemoteGateway {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
+  startProcessing(message: NormalizedMessage): Promise<void>;
   sendText(chatId: string, text: string): Promise<unknown>;
   sendMarkdown(chatId: string, markdown: string): Promise<unknown>;
   sendChoice(chatId: string, paneId: string, screen: ScreenDetection, agent: AgentId): Promise<unknown>;
@@ -84,6 +85,13 @@ export class LarkGateway implements RemoteGateway {
   private readonly signer: ActionSigner;
   private readonly formActions = new Map<string, Map<string, SignedAction>>();
   private readonly formActionsInFlight = new Set<string>();
+  private readonly processingReactions = new Map<string, {
+    messageId: string;
+    reactionId: string;
+    timer: ReturnType<typeof setTimeout>;
+    generation: number;
+  }>();
+  private readonly processingGenerations = new Map<string, number>();
 
   constructor(config: AppConfig, secrets: AppSecrets, private readonly handler: LarkGatewayHandler) {
     this.signer = new ActionSigner(secrets.callbackSecret);
@@ -211,7 +219,7 @@ export class LarkGateway implements RemoteGateway {
           this.formActions.delete(event.messageId);
           return;
         }
-        await this.channel.send(event.chatId, { text: `卡片操作未完成：${result.content}` });
+        await this.sendMessage(event.chatId, { text: `卡片操作未完成：${result.content}` });
         return;
       }
       if (result.type === 'session-created') {
@@ -241,7 +249,7 @@ export class LarkGateway implements RemoteGateway {
       }
       if (result.type === 'session-picker') {
         if (action.kind === 'session-start-error') {
-          await this.channel.send(event.chatId, { card: sessionPickerCard(
+          await this.sendMessage(event.chatId, { card: sessionPickerCard(
             event.chatId, result.sessions, result.activeSessionId, this.signer, result.confirmingStopSessionId,
           ) });
           return;
@@ -252,7 +260,7 @@ export class LarkGateway implements RemoteGateway {
         return;
       }
       if (result.type === 'session-create-form') {
-        const sent = await this.channel.send(event.chatId, { card: sessionCreateCard() });
+        const sent = await this.sendMessage(event.chatId, { card: sessionCreateCard() });
         this.rememberSessionCreateFormAction(sent.messageId, event.chatId);
         const sourceCard = action.kind === 'session-create' && result.sessions
           ? sessionPickerCard(event.chatId, result.sessions, result.activeSessionId, this.signer, undefined, false)
@@ -260,7 +268,7 @@ export class LarkGateway implements RemoteGateway {
         await this.updateCardAfterAction(event.messageId, sourceCard).catch(async (error) => {
           const detail = cardErrorDetail(error);
           console.error(`[lca] failed to retire session-create source card: message=${event.messageId} detail=${detail}`);
-          await this.channel.send(event.chatId, {
+          await this.sendMessage(event.chatId, {
             text: '新建表单已发送，但原卡片状态更新失败；请使用最新的“新建 Coding Session”卡片继续操作。',
           }).catch(() => undefined);
         });
@@ -293,7 +301,7 @@ export class LarkGateway implements RemoteGateway {
       }
       if (action.kind === 'session-create') this.formActions.delete(event.messageId);
       console.error(`[lca] deferred card action failed: kind=${action.kind} action=${action.action} message=${event.messageId} detail=${detail}`);
-      await this.channel.send(event.chatId, {
+      await this.sendMessage(event.chatId, {
         text: action.kind === 'session-create'
           ? `新建 Session 表单打开失败：${detail}。请重新发送 /sessions，或直接使用 /start 命令。`
           : `卡片操作同步失败：${detail}`,
@@ -323,7 +331,7 @@ export class LarkGateway implements RemoteGateway {
     } catch (error) {
       const detail = cardErrorDetail(error);
       console.error(`[lca] failed to mark expired card: message=${event.messageId} detail=${detail}`);
-      await this.channel.send(event.chatId, {
+      await this.sendMessage(event.chatId, {
         text: '卡片或按钮已失效，请重新发送对应命令获取最新卡片；Session 相关操作可发送 /sessions。',
       }).catch(() => undefined);
     }
@@ -333,20 +341,41 @@ export class LarkGateway implements RemoteGateway {
     return this.channel.connect();
   }
 
-  disconnect(): Promise<void> {
-    return this.channel.disconnect();
+  async disconnect(): Promise<void> {
+    const chats = new Set([...this.processingGenerations.keys(), ...this.processingReactions.keys()]);
+    await Promise.all([...chats].map((chatId) => this.clearProcessing(chatId)));
+    await this.channel.disconnect();
+  }
+
+  async startProcessing(message: NormalizedMessage): Promise<void> {
+    await this.clearProcessing(message.chatId);
+    const generation = this.processingGenerations.get(message.chatId) ?? 0;
+    try {
+      const reactionId = await this.channel.addReaction(message.messageId, 'Typing');
+      if (this.processingGenerations.get(message.chatId) !== generation) {
+        await this.removeProcessingReaction(message.messageId, reactionId);
+        return;
+      }
+      const timer = setTimeout(() => {
+        void this.clearProcessing(message.chatId, generation);
+      }, 10 * 60_000);
+      timer.unref?.();
+      this.processingReactions.set(message.chatId, { messageId: message.messageId, reactionId, timer, generation });
+    } catch (error) {
+      console.error(`[lca] failed to add processing reaction: chat=${message.chatId} message=${message.messageId} detail=${cardErrorDetail(error)}`);
+    }
   }
 
   sendText(chatId: string, text: string): Promise<unknown> {
-    return this.channel.send(chatId, { text });
+    return this.sendMessage(chatId, { text });
   }
 
   sendMarkdown(chatId: string, markdown: string): Promise<unknown> {
-    return this.channel.send(chatId, { markdown });
+    return this.sendMessage(chatId, { markdown });
   }
 
   async sendChoice(chatId: string, paneId: string, screen: ScreenDetection, agent: AgentId): Promise<unknown> {
-    const result = await this.channel.send(chatId, { card: choiceCard(chatId, paneId, screen, this.signer, agent) });
+    const result = await this.sendMessage(chatId, { card: choiceCard(chatId, paneId, screen, this.signer, agent) });
     this.rememberFormActions(result.messageId, chatId, paneId, screen, agent);
     return result;
   }
@@ -362,7 +391,7 @@ export class LarkGateway implements RemoteGateway {
   }
 
   async sendManual(chatId: string, view: ManualControlView): Promise<unknown> {
-    const result = await this.channel.send(chatId, { card: manualControlCard(chatId, view, this.signer) });
+    const result = await this.sendMessage(chatId, { card: manualControlCard(chatId, view, this.signer) });
     this.rememberManualFormActions(result.messageId, chatId, view);
     return result;
   }
@@ -426,33 +455,60 @@ export class LarkGateway implements RemoteGateway {
   }
 
   sendStatus(chatId: string, status: RuntimeStatus): Promise<unknown> {
-    return this.channel.send(chatId, { card: statusCard(status) });
+    return this.sendMessage(chatId, { card: statusCard(status) });
   }
 
   sendSessionPicker(chatId: string, sessions: ManagedSession[], activeSessionId?: string): Promise<unknown> {
-    return this.channel.send(chatId, { card: sessionPickerCard(chatId, sessions, activeSessionId, this.signer) });
+    return this.sendMessage(chatId, { card: sessionPickerCard(chatId, sessions, activeSessionId, this.signer) });
   }
 
   sendResumePicker(chatId: string, session: ManagedSession, picker: ResumePickerView): Promise<unknown> {
-    return this.channel.send(chatId, { card: resumePickerCard(chatId, session, picker, this.signer) });
+    return this.sendMessage(chatId, { card: resumePickerCard(chatId, session, picker, this.signer) });
   }
 
   sendStartupConflict(chatId: string, request: StartSessionRequest, owner: ManagedSession): Promise<unknown> {
-    return this.channel.send(chatId, { card: startupConflictCard(chatId, requestSession(request), owner, this.signer) });
+    return this.sendMessage(chatId, { card: startupConflictCard(chatId, requestSession(request), owner, this.signer) });
   }
 
   async sendSessionCreate(chatId: string): Promise<unknown> {
-    const result = await this.channel.send(chatId, { card: sessionCreateCard() });
+    const result = await this.sendMessage(chatId, { card: sessionCreateCard() });
     this.rememberSessionCreateFormAction(result.messageId, chatId);
     return result;
   }
 
   sendSessionStartupFailure(chatId: string, failure: SessionStartupFailure): Promise<unknown> {
-    return this.channel.send(chatId, { card: sessionStartupFailureCard(chatId, failure, this.signer) });
+    return this.sendMessage(chatId, { card: sessionStartupFailureCard(chatId, failure, this.signer) });
   }
 
   sendStopConfirmation(chatId: string, paneId: string, fingerprint: string, agent: AgentId): Promise<unknown> {
-    return this.channel.send(chatId, { card: stopCard(chatId, paneId, fingerprint, this.signer, agent) });
+    return this.sendMessage(chatId, { card: stopCard(chatId, paneId, fingerprint, this.signer, agent) });
+  }
+
+  private async sendMessage(chatId: string, input: Parameters<LarkChannel['send']>[1]): Promise<Awaited<ReturnType<LarkChannel['send']>>> {
+    await this.clearProcessing(chatId);
+    return this.channel.send(chatId, input);
+  }
+
+  private async clearProcessing(chatId: string, expectedGeneration?: number): Promise<void> {
+    const currentGeneration = this.processingGenerations.get(chatId) ?? 0;
+    if (expectedGeneration !== undefined && currentGeneration !== expectedGeneration) return;
+    this.processingGenerations.set(chatId, currentGeneration + 1);
+    const pending = this.processingReactions.get(chatId);
+    if (!pending) return;
+    this.processingReactions.delete(chatId);
+    clearTimeout(pending.timer);
+    await this.removeProcessingReaction(pending.messageId, pending.reactionId);
+  }
+
+  private async removeProcessingReaction(messageId: string, reactionId: string): Promise<void> {
+    try {
+      await this.channel.removeReaction(messageId, reactionId);
+    } catch (error) {
+      console.error(`[lca] failed to remove processing reaction by id: message=${messageId} detail=${cardErrorDetail(error)}`);
+      await this.channel.removeReactionByEmoji(messageId, 'Typing').catch((fallbackError) => {
+        console.error(`[lca] failed to remove processing reaction by emoji: message=${messageId} detail=${cardErrorDetail(fallbackError)}`);
+      });
+    }
   }
 }
 

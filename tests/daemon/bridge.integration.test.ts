@@ -117,11 +117,15 @@ rl.on('line', (line) => {
     expect((await store.loadState()).sessions?.['instant-fail']).toBeUndefined();
 
     await fake.emit(message('hello from lark'));
+    expect(fake.processingMessages.map(({ content }) => content)).toContain('hello from lark');
     expect(fake.texts.at(-1)?.text).toContain('已自动连接');
     await waitFor(async () => {
       const result = await requestDaemon(paths.socket, { method: 'tail', lines: 40 });
       return result.ok && String(result.value).includes('RECEIVED:hello from lark');
     });
+    const processingCount = fake.processingMessages.length;
+    await fake.emit(message('/status'));
+    expect(fake.processingMessages).toHaveLength(processingCount);
     await fake.emit(message(`/start instant-fail --agent codex --cwd "${root}"`));
     expect(fake.startupFailures.at(-1)).toMatchObject({
       sessionId: 'instant-fail', agent: 'codex', exitStatus: 7,
@@ -360,9 +364,11 @@ class FakeGateway implements RemoteGateway {
   statuses: Array<RuntimeStatus> = [];
   manualViews: ManualControlView[] = [];
   startupFailures: SessionStartupFailure[] = [];
+  processingMessages: NormalizedMessage[] = [];
   failNextSessionPicker = false;
   connect = async (): Promise<void> => undefined;
   disconnect = async (): Promise<void> => undefined;
+  startProcessing = async (value: NormalizedMessage): Promise<void> => { this.processingMessages.push(value); };
   sendText = async (chatId: string, text: string): Promise<void> => { this.texts.push({ chatId, text }); };
   sendMarkdown = async (chatId: string, markdown: string): Promise<void> => { this.markdowns.push({ chatId, markdown }); };
   sendChoice = async (_chatId: string, _paneId: string, _screen: ScreenDetection): Promise<void> => undefined;

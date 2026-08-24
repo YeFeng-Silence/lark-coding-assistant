@@ -651,6 +651,7 @@ export class AssistantDaemon {
       return;
     }
 
+    await this.gateway?.startProcessing(message);
     await this.poll();
     if (this.shouldQueueMessage()) {
       if (this.pendingMessages.length >= 100) {
