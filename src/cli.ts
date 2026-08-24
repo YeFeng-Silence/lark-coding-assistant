@@ -20,7 +20,9 @@ import { registrationDomains } from './lark/registration.js';
 import { AppError, systemErrorCode } from './core/errors.js';
 import { cliDebugEnabled, formatCliError, withCliOperation } from './cli-errors.js';
 import type { DaemonRequestInput, DaemonResult } from './daemon/protocol.js';
+import type { RuntimeStatus } from './daemon/protocol.js';
 import { validateStartSessionRequest } from './session/start-request.js';
+import { fallbackRuntimeSessions, formatCliStatus } from './cli-status.js';
 
 const program = new Command();
 const paths = resolveAppPaths();
@@ -213,17 +215,34 @@ async function attachLocal(name: string): Promise<void> {
 
 async function runStatus(name?: string): Promise<void> {
   try {
-    const response = await requestDaemon(paths.socket, { method: 'status', sessionId: name });
+    const [response, health] = await Promise.all([
+      requestDaemon(paths.socket, { method: 'status', sessionId: name }),
+      daemonHealth(paths),
+    ]);
     if (!response.ok) throw new Error(response.error);
-    console.log(JSON.stringify(response.value, null, 2));
+    const runtime = response.value as RuntimeStatus;
+    console.log(formatCliStatus({
+      daemon: health.status === 'running'
+        ? { status: 'running', pid: health.info.pid, version: health.info.version }
+        : health,
+      cliVersion: packageInfo.version,
+      state: runtime.state,
+      sessions: runtime.sessions ?? fallbackRuntimeSessions(runtime.state, name),
+      requestedSessionId: name,
+      columns: process.stdout.columns,
+    }));
   } catch {
-    const state = await store.loadState();
-    const health = await daemonHealth(paths);
-    console.log(JSON.stringify({
-      daemon: health.status,
-      ...(health.status === 'unresponsive' ? { daemonPid: health.pid } : {}),
+    const [state, health] = await Promise.all([store.loadState(), daemonHealth(paths)]);
+    console.log(formatCliStatus({
+      daemon: health.status === 'running'
+        ? { status: 'running', pid: health.info.pid, version: health.info.version }
+        : health,
+      cliVersion: packageInfo.version,
       state,
-    }, null, 2));
+      sessions: fallbackRuntimeSessions(state, name),
+      requestedSessionId: name,
+      columns: process.stdout.columns,
+    }));
   }
 }
 

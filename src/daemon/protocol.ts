@@ -39,4 +39,12 @@ export interface RuntimeStatus {
   session?: ManagedSession;
   screen?: ScreenDetection;
   paneAlive: boolean;
+  sessions?: RuntimeSessionStatus[];
+}
+
+export interface RuntimeSessionStatus {
+  session: ManagedSession;
+  screen?: ScreenDetection;
+  paneAlive?: boolean;
+  active: boolean;
 }
