@@ -21,7 +21,7 @@ describe('transactional toggle forms', () => {
      Submit
 Enter to select · ↑/↓ to navigate · Esc to cancel`);
     const session = {
-      id: 'claude-test', agent: 'claude-code' as const, sessionName: 'lca-claude-test',
+      id: 'claude-test', agent: 'claude' as const, sessionName: 'lca-claude-test',
       paneId: '%1', cwd: '/tmp', agentVersion: 'test', updatedAt: 1,
     };
     const daemon = Object.create(AssistantDaemon.prototype) as AssistantDaemon;
@@ -76,7 +76,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel`);
     };
 
     const action: SignedAction = {
-      v: 1, kind: 'choice', interactionKind: 'question', agent: 'claude-code', action: CHOICE_FORM_SUBMIT_ACTION,
+      v: 1, kind: 'choice', interactionKind: 'question', agent: 'claude', action: CHOICE_FORM_SUBMIT_ACTION,
       paneId: '%1', fingerprint: screen.interaction?.revision ?? screen.fingerprint,
       chatId: 'oc_1', nonce: 'test', expiresAt: Date.now() + 60_000, sig: 'test',
     };
@@ -95,7 +95,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel`);
 
     const result = await internal.handleChoiceAction(action, session, event);
 
-    expect(result).toMatchObject({ type: 'success', content: '已向 Claude Code 提交答案。' });
+    expect(result).toMatchObject({ type: 'success', content: '已向 claude 提交答案。' });
     expect(internal.screen.state).toBe('idle');
     expect(keys.filter((key) => key === 'Enter')).toHaveLength(2);
   });
@@ -109,7 +109,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel`);
 space to toggle | tab to add notes | enter to submit answer
 esc to interrupt`);
     const session = {
-      id: 'helix', agent: 'trae-cli' as const, sessionName: 'lca-helix', paneId: '%2',
+      id: 'helix', agent: 'traex' as const, sessionName: 'lca-helix', paneId: '%2',
       cwd: '/tmp', agentVersion: 'test', updatedAt: 1,
     };
     const daemon = Object.create(AssistantDaemon.prototype) as AssistantDaemon;
@@ -162,7 +162,7 @@ esc to interrupt`);
       },
     };
     const action: SignedAction = {
-      v: 1, kind: 'choice', interactionKind: 'question', agent: 'trae-cli', action: CHOICE_FORM_SUBMIT_ACTION,
+      v: 1, kind: 'choice', interactionKind: 'question', agent: 'traex', action: CHOICE_FORM_SUBMIT_ACTION,
       paneId: '%2', fingerprint: screen.interaction?.revision ?? screen.fingerprint,
       chatId: 'oc_1', nonce: 'test', expiresAt: Date.now() + 60_000, sig: 'test',
     };
@@ -179,7 +179,7 @@ esc to interrupt`);
       },
     } as CardActionEvent);
 
-    expect(result).toMatchObject({ type: 'success', content: '已向 Trae CLI 提交答案。' });
+    expect(result).toMatchObject({ type: 'success', content: '已向 traex 提交答案。' });
     expect(keys.filter((key) => key === 'Space')).toHaveLength(2);
     expect(keys.filter((key) => key === 'Enter')).toHaveLength(1);
     expect(keys).toContain('Tab');
@@ -257,7 +257,7 @@ tab to add notes | enter to submit answer | esc to interrupt`);
 
 Enter to select · ↑/↓ to navigate · ctrl+g to edit in Vim · Esc to cancel`);
     const session = {
-      id: 'claude-test', agent: 'claude-code' as const, sessionName: 'lca-claude-test', paneId: '%4',
+      id: 'claude-test', agent: 'claude' as const, sessionName: 'lca-claude-test', paneId: '%4',
       cwd: '/tmp', agentVersion: '2.1.235', updatedAt: 1,
     };
     const daemon = Object.create(AssistantDaemon.prototype) as AssistantDaemon;
@@ -286,7 +286,7 @@ Enter to select · ↑/↓ to navigate · ctrl+g to edit in Vim · Esc to cancel
       },
     };
     const action: SignedAction = {
-      v: 1, kind: 'choice', interactionKind: 'question', agent: 'claude-code', action: '3', paneId: '%4',
+      v: 1, kind: 'choice', interactionKind: 'question', agent: 'claude', action: '3', paneId: '%4',
       fingerprint: screen.interaction?.revision ?? screen.fingerprint, chatId: 'oc_1', nonce: 'test',
       expiresAt: Date.now() + 60_000, sig: 'test',
     };

@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { access, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
@@ -13,13 +13,14 @@ import type { AppConfig, Tenant } from './core/model.js';
 import { runFile } from './platform/process.js';
 import { requestDaemon } from './daemon/client.js';
 import { resolveResumeOption } from './agents/resume.js';
-import { getAgentAdapter, isAgentId } from './agents/registry.js';
+import { getAgentAdapter, normalizeAgentId } from './agents/registry.js';
 import type { AgentId, ResumeOptions } from './agents/types.js';
-import { daemonInfo, startDaemonProcess, stopDaemonProcess } from './daemon/lifecycle.js';
+import { daemonHealth, daemonInfo, startDaemonProcess, stopDaemonProcess } from './daemon/lifecycle.js';
 import { registrationDomains } from './lark/registration.js';
 import { AppError, systemErrorCode } from './core/errors.js';
 import { cliDebugEnabled, formatCliError, withCliOperation } from './cli-errors.js';
 import type { DaemonRequestInput, DaemonResult } from './daemon/protocol.js';
+import { validateStartSessionRequest } from './session/start-request.js';
 
 const program = new Command();
 const paths = resolveAppPaths();
@@ -33,7 +34,7 @@ program.name('lark-coding-assistant').version(packageInfo.version);
 program.command('init').description('Configure Feishu/Lark PersonalAgent').action(runInit);
 program.command('start')
   .option('-n, --name <name>', 'Session name', 'default')
-  .option('--agent <agent>', 'Coding agent (codex, trae-cli, or claude-code)', parseAgentId, 'codex')
+  .option('--agent <agent>', 'Coding agent (codex, traex, or claude)', parseAgentId, 'codex')
   .option('--cwd <path>', 'Coding agent working directory')
   .option('--resume [session-id]', 'Resume agent session; omit the ID to open the picker')
   .option('--resume-last', 'Resume the most recent agent session in this working directory')
@@ -45,7 +46,7 @@ program.command('status').argument('[name]', 'Session name').description('Show d
 program.command('stop').argument('[name]', 'Session name').description('Stop managed coding-agent/tmux session').action(runStop);
 program.command('logs').option('-n, --lines <count>', 'Number of lines', '100').action(runLogs);
 program.command('reset-owner').description('Clear persistent Lark owner').action(runResetOwner);
-const daemonCommand = program.command('daemon').description('Manage the Lark bridge daemon');
+const daemonCommand = program.command('daemon').description('Start or manage the Lark bridge daemon').action(runDaemonStart);
 daemonCommand.command('start').description('Start the bridge daemon').action(runDaemonStart);
 daemonCommand.command('stop').description('Stop the bridge daemon without stopping coding-agent sessions').action(runDaemonStop);
 daemonCommand.command('restart').description('Restart the bridge daemon without stopping coding-agent sessions').action(runDaemonRestart);
@@ -97,7 +98,7 @@ async function runInit(): Promise<void> {
     tenant: registeredTenant,
     appId: registration.client_id,
     tmuxBinary: 'tmux',
-    agentBinaries: { codex: 'codex', 'trae-cli': 'trae-cli', 'claude-code': 'claude' },
+    agentBinaries: { codex: 'codex', traex: 'trae-cli', claude: 'claude' },
     pollIntervalMs: 650,
   };
   const previousState = await store.loadState();
@@ -133,14 +134,14 @@ interface StartOptions extends ResumeOptions {
 async function runStart(options: StartOptions): Promise<void> {
   const cwd = resolve(options.cwd ?? process.cwd());
   const resume = resolveResumeOption(options);
-  await access(cwd).catch((error) => {
-    throw new AppError('INVALID_CWD', `working directory is unavailable: ${cwd}`, { cwd }, { cause: error });
+  const request = await validateStartSessionRequest({
+    sessionId: options.name, agent: options.agent, cwd, resume,
   });
   await ensureInitialized();
   await preflight(options.agent);
   await ensureDaemon();
   const value = await daemonValue<StartSessionValue>({
-    method: 'start', cwd, sessionId: options.name, agent: options.agent, resume,
+    method: 'start', ...request,
   });
   if (value.binding.mode === 'reused') {
     console.log('\n已自动沿用原有飞书/Lark 私聊绑定。\n');
@@ -217,7 +218,12 @@ async function runStatus(name?: string): Promise<void> {
     console.log(JSON.stringify(response.value, null, 2));
   } catch {
     const state = await store.loadState();
-    console.log(JSON.stringify({ daemon: 'stopped', state }, null, 2));
+    const health = await daemonHealth(paths);
+    console.log(JSON.stringify({
+      daemon: health.status,
+      ...(health.status === 'unresponsive' ? { daemonPid: health.pid } : {}),
+      state,
+    }, null, 2));
   }
 }
 
@@ -262,11 +268,21 @@ async function runDaemonRestart(): Promise<void> {
 }
 
 async function runDaemonStatus(): Promise<void> {
-  const info = await daemonInfo(paths);
-  if (!info) {
+  const health = await daemonHealth(paths);
+  if (health.status === 'stopped') {
     console.log(`Bridge daemon: stopped\nCLI version: ${packageInfo.version}`);
     return;
   }
+  if (health.status === 'unresponsive') {
+    console.log([
+      'Bridge daemon: unresponsive',
+      `PID: ${health.pid}`,
+      `CLI version: ${packageInfo.version}`,
+      '建议运行：lark-coding-assistant daemon restart',
+    ].join('\n'));
+    return;
+  }
+  const info = health.info;
   console.log([
     'Bridge daemon: running',
     `PID: ${info.pid}`,
@@ -292,12 +308,13 @@ async function preflight(agentId: AgentId): Promise<void> {
 }
 
 function parseAgentId(value: string): AgentId {
-  if (!isAgentId(value)) {
+  const agent = normalizeAgentId(value);
+  if (!agent) {
     throw new AppError('INVALID_OPTIONS', `unsupported coding agent: ${value}`, {
       reason: `不支持 coding agent「${value}」`,
     });
   }
-  return value;
+  return agent;
 }
 
 async function ensureDaemon(): Promise<void> {

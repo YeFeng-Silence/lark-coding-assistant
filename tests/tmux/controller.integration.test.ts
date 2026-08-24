@@ -35,6 +35,22 @@ describe.runIf(await hasTmux())('TmuxController integration', () => {
         env: { LARK_CODING_ASSISTANT_SESSION_ID: 'tmux-test-session' },
       });
       expect(pane.paneId).toMatch(/^%\d+$/);
+      await tmux.writeMetadata(sessionName, {
+        managed: true,
+        sessionId: 'tmux-test-session',
+        agent: 'codex',
+        cwd: directory,
+        agentVersion: 'test-version',
+        agentSessionId: 'native-session',
+      });
+      expect(await tmux.readMetadata(sessionName)).toEqual({
+        managed: true,
+        sessionId: 'tmux-test-session',
+        agent: 'codex',
+        cwd: directory,
+        agentVersion: 'test-version',
+        agentSessionId: 'native-session',
+      });
       await waitFor(async () => (await tmux.capture(pane.paneId, 30)).includes('HOOK_SESSION:tmux-test-session'));
       await tmux.sendText(pane.paneId, 'hello from remote');
       await waitFor(async () => (await tmux.capture(pane.paneId, 30)).includes('RECEIVED:hello from remote'));
@@ -51,6 +67,22 @@ describe.runIf(await hasTmux())('TmuxController integration', () => {
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
+  });
+
+  it('preserves startup exit status and terminal output', async () => {
+    const sessionName = `lca-dead-${process.pid}-${Date.now()}`;
+    sessions.push(sessionName);
+    const tmux = new TmuxController();
+    const pane = await tmux.create({
+      sessionName,
+      cwd: tmpdir(),
+      binary: process.execPath,
+      args: ['-e', "console.log('STARTUP_FAILURE_DETAIL'); process.exit(7)"],
+      preserveOnExit: true,
+    });
+    await waitFor(async () => (await tmux.inspect(pane.paneId))?.dead === true);
+    expect(await tmux.inspect(pane.paneId)).toMatchObject({ dead: true, exitStatus: 7 });
+    expect(await tmux.capture(pane.paneId, 20)).toContain('STARTUP_FAILURE_DETAIL');
   });
 });
 

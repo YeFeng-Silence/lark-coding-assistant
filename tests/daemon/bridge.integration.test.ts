@@ -7,12 +7,13 @@ import { AssistantDaemon } from '../../src/daemon/server.js';
 import { requestDaemon } from '../../src/daemon/client.js';
 import { resolveAppPaths } from '../../src/core/paths.js';
 import { AppStore } from '../../src/core/store.js';
-import type { GatewayFactory, LarkGatewayHandler, RemoteGateway } from '../../src/lark/gateway.js';
+import type { GatewayFactory, LarkActionResult, LarkGatewayHandler, RemoteGateway } from '../../src/lark/gateway.js';
 import type { ManagedSession } from '../../src/core/model.js';
 import type { SignedAction } from '../../src/lark/action-signing.js';
 import type { ScreenDetection } from '../../src/screen/detector.js';
 import type { RuntimeStatus } from '../../src/daemon/protocol.js';
 import type { ManualControlView } from '../../src/lark/cards.js';
+import type { SessionStartupFailure } from '../../src/session/startup-failure.js';
 import { runFile } from '../../src/platform/process.js';
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -32,6 +33,18 @@ import { createInterface } from 'node:readline';
 if (process.argv.includes('--version')) { console.log('codex-cli 0.147.0'); process.exit(0); }
 console.log('OpenAI Codex');
 console.log('ARGS:' + JSON.stringify(process.argv.slice(2)));
+if (process.env.LARK_CODING_ASSISTANT_SESSION_ID === 'instant-fail') {
+  console.log('failed to acquire thread writer lock');
+  process.exit(7);
+}
+if (process.argv.includes('resume') && !process.argv.includes('--last')) {
+  console.log('Resume a previous session');
+  console.log('Type to search                   Filter: [Cwd] Sort: [Updated]');
+  console.log('  ❯ 3d ago      Previous task');
+  console.log('    5d ago      Older task');
+  console.log('──────────────────────────────────────────────── 1 / 2 · 100% ─');
+  console.log('enter resume   esc new   ctrl+c quit   ↑/↓ browse');
+}
 const rl = createInterface({ input: process.stdin });
 process.stdout.write('› ');
 rl.on('line', (line) => {
@@ -48,7 +61,7 @@ rl.on('line', (line) => {
     await store.ensure();
     await store.saveConfig({
       tenant: 'feishu', appId: 'cli_test', tmuxBinary: 'tmux',
-      agentBinaries: { codex: fakeCodex, 'trae-cli': fakeCodex, 'claude-code': fakeCodex }, pollIntervalMs: 50,
+      agentBinaries: { codex: fakeCodex, 'traex': fakeCodex, 'claude': fakeCodex }, pollIntervalMs: 50,
     });
     await store.saveSecrets({ appSecret: 'test', callbackSecret: 'callback-test' });
     await store.saveState({ schemaVersion: 2, ownerOpenId: 'ou_owner', sessions: {}, updatedAt: Date.now() });
@@ -91,6 +104,17 @@ rl.on('line', (line) => {
       errorContext: { sessionId: 'default' },
     });
     expect(JSON.stringify(duplicateStart)).not.toContain('at AssistantDaemon');
+    const instantFailure = await requestDaemon(paths.socket, {
+      method: 'start', cwd: root, sessionId: 'instant-fail', agent: 'codex',
+    });
+    expect(instantFailure).toMatchObject({
+      ok: false,
+      errorCode: 'AGENT_EXITED_DURING_STARTUP',
+      errorContext: { sessionId: 'instant-fail', agent: 'codex', exitStatus: 7 },
+    });
+    expect((instantFailure as { errorContext?: { terminalExcerpt?: string } }).errorContext?.terminalExcerpt)
+      .toContain('failed to acquire thread writer lock');
+    expect((await store.loadState()).sessions?.['instant-fail']).toBeUndefined();
 
     await fake.emit(message('hello from lark'));
     expect(fake.texts.at(-1)?.text).toContain('已自动连接');
@@ -98,6 +122,12 @@ rl.on('line', (line) => {
       const result = await requestDaemon(paths.socket, { method: 'tail', lines: 40 });
       return result.ok && String(result.value).includes('RECEIVED:hello from lark');
     });
+    await fake.emit(message(`/start instant-fail --agent codex --cwd "${root}"`));
+    expect(fake.startupFailures.at(-1)).toMatchObject({
+      sessionId: 'instant-fail', agent: 'codex', exitStatus: 7,
+      terminalExcerpt: expect.stringContaining('failed to acquire thread writer lock'),
+    });
+    expect((await store.loadState()).sessions?.['instant-fail']).toBeUndefined();
 
     await fake.emit(message('/detach'));
     await fake.emit(message('must not auto reconnect after detach'));
@@ -124,21 +154,29 @@ rl.on('line', (line) => {
     expect(fake.texts.at(-1)?.text).toBe('用法：/tail [20-300]');
     const manualMarkdownCount = fake.markdowns.length;
 
-    const second = await requestDaemon(paths.socket, {
-      method: 'start', cwd: root, sessionId: 'second', agent: 'trae-cli', resume: { mode: 'last' },
+    const secondStart = requestDaemon(paths.socket, {
+      method: 'start', cwd: root, sessionId: 'second', agent: 'traex', resume: { mode: 'last' },
     });
+    await waitFor(async () => Boolean((await store.loadState()).sessions?.second));
+    await requestDaemon(paths.socket, {
+      method: 'agentSessionStarted',
+      candidate: { sessionId: 'second', agent: 'traex', agentSessionId: 'thread-second', cwd: root, source: 'resume' },
+    });
+    const second = await secondStart;
     expect(second.ok).toBe(true);
-    const secondSession = (second as { ok: true; value: { session: ManagedSession } }).value.session;
+    const secondSession = (await store.loadState()).sessions?.second as ManagedSession;
     await fake.emit(message('/sessions'));
     expect(fake.sessionPickers.at(-1)).toMatchObject({ activeSessionId: 'default' });
     expect(fake.sessionPickers.at(-1)?.sessions.map(({ id }) => id)).toEqual(['default', 'second']);
+    await fake.emit(message('/start'));
+    expect(fake.sessionCreateChats.at(-1)).toBe('oc_owner');
     fake.failNextSessionPicker = true;
     await fake.emit(message('/sessions'));
     expect(fake.texts.at(-1)?.text).toContain('Session 选择卡片发送失败');
     const switched = await fake.emitSignedAction({
       v: 1,
       kind: 'session',
-      agent: 'trae-cli',
+      agent: 'traex',
       action: 'second',
       paneId: secondSession.paneId,
       fingerprint: String(secondSession.updatedAt),
@@ -148,7 +186,7 @@ rl.on('line', (line) => {
       sig: 'test',
     });
     expect(switched).toMatchObject({ type: 'success', content: '已连接到 second' });
-    expect((await store.loadState()).sessions?.second?.agent).toBe('trae-cli');
+    expect((await store.loadState()).sessions?.second?.agent).toBe('traex');
     await waitFor(async () => {
       const result = await requestDaemon(paths.socket, { method: 'tail', lines: 40 });
       return result.ok && String(result.value).includes('"resume","--last"');
@@ -159,7 +197,83 @@ rl.on('line', (line) => {
       return result.ok && String(result.value).includes('RECEIVED:hello second session');
     });
     await fake.emit(message('/use default'));
-    expect(fake.texts.at(-1)?.text).toContain('已连接到 Codex session：default');
+    expect(fake.texts.at(-1)?.text).toContain('已连接到 codex session：default');
+    const stopAction = {
+      v: 1 as const, kind: 'session-stop' as const, sessionId: 'second', agent: 'traex' as const,
+      action: 'request', paneId: secondSession.paneId, fingerprint: String(secondSession.updatedAt),
+      chatId: 'oc_owner', nonce: 'stop-request', expiresAt: Date.now() + 60_000, sig: 'test',
+    };
+    expect(await fake.emitSignedAction(stopAction)).toMatchObject({
+      type: 'session-picker', confirmingStopSessionId: 'second',
+    });
+    expect(await fake.emitSignedAction({ ...stopAction, action: 'cancel', nonce: 'stop-cancel' })).toMatchObject({
+      type: 'session-picker', content: '已取消关闭 second。',
+    });
+    await fake.emit(message('/start malformed --agent codex'));
+    expect(fake.texts.at(-1)?.text).toContain('请提供 --cwd');
+    await fake.emit(message(`/start remote --agent claude-code --cwd "${root}"`));
+    expect(fake.texts.at(-1)?.text).toContain('已启动并连接 claude session「remote」');
+    expect((await store.loadState()).activeSessionId).toBe('remote');
+    expect((await store.loadState()).sessions?.remote?.agent).toBe('claude');
+    await fake.emit(message('/use default'));
+    await requestDaemon(paths.socket, { method: 'stop', sessionId: 'remote' });
+
+    const cardCreated = await fake.emitSignedFormAction({
+      v: 1, kind: 'session-create', agent: 'codex', action: 'submit', paneId: '', fingerprint: 'create',
+      chatId: 'oc_owner', nonce: 'form-nonce', expiresAt: Date.now() + 60_000, sig: 'test',
+    }, {
+      session_name: 'cardremote', session_agent: 'traex', session_cwd: root, session_resume: 'new',
+    });
+    expect(cardCreated).toMatchObject({ type: 'session-created', session: { id: 'cardremote', agent: 'traex' } });
+    const legacyLast = await fake.emitSignedFormAction({
+      v: 1, kind: 'session-create', agent: 'codex', action: 'submit', paneId: '', fingerprint: 'create',
+      chatId: 'oc_owner', nonce: 'legacy-last', expiresAt: Date.now() + 60_000, sig: 'test',
+    }, {
+      session_name: 'legacy-last', session_agent: 'codex', session_cwd: root, session_resume: 'last',
+    });
+    expect(legacyLast).toMatchObject({
+      type: 'error', content: expect.stringContaining('飞书已不再支持“恢复上次会话”'),
+    });
+    const pickerCreated = await fake.emitSignedFormAction({
+      v: 1, kind: 'session-create', agent: 'codex', action: 'submit', paneId: '', fingerprint: 'create',
+      chatId: 'oc_owner', nonce: 'picker-form', expiresAt: Date.now() + 60_000, sig: 'test',
+    }, {
+      session_name: 'pickerremote', session_agent: 'codex', session_cwd: root, session_resume: 'picker',
+    });
+    expect(pickerCreated).toMatchObject({
+      type: 'resume-picker', session: { id: 'pickerremote', agent: 'codex' },
+      picker: { options: [{ label: 'Previous task', selected: true }, { label: 'Older task', selected: false }] },
+    });
+    expect(fake.manualViews.some(({ session }) => session.id === 'pickerremote')).toBe(false);
+
+    const pickerRollback = await fake.emitSignedFormAction({
+      v: 1, kind: 'session-create', agent: 'codex', action: 'submit', paneId: '', fingerprint: 'create',
+      chatId: 'oc_owner', nonce: 'picker-rollback', expiresAt: Date.now() + 60_000, sig: 'test',
+    }, {
+      session_name: 'pickerrollback', session_agent: 'codex', session_cwd: root, session_resume: 'picker',
+    }) as Extract<LarkActionResult, { type: 'resume-picker' }>;
+    expect(pickerRollback).toMatchObject({ type: 'resume-picker', session: { id: 'pickerrollback' } });
+    await fake.handler?.onResumePickerDeliveryFailure?.(pickerRollback.session);
+    expect((await store.loadState()).sessions?.pickerrollback).toBeUndefined();
+
+    const pickerResult = pickerCreated as Extract<LarkActionResult, { type: 'resume-picker' }>;
+    const selectedOption = pickerResult.picker.options[0];
+    const pickerSelection = fake.emitSignedAction({
+      v: 1, kind: 'resume-picker', sessionId: 'pickerremote', agent: 'codex',
+      action: `select:${selectedOption?.id}`, paneId: pickerResult.session.paneId,
+      fingerprint: pickerResult.picker.fingerprint, chatId: 'oc_owner', nonce: 'picker-select',
+      expiresAt: Date.now() + 60_000, sig: 'test',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    await requestDaemon(paths.socket, {
+      method: 'agentSessionStarted',
+      candidate: { sessionId: 'pickerremote', agent: 'codex', agentSessionId: 'picker-native', cwd: root, source: 'resume' },
+    });
+    expect(await pickerSelection).toMatchObject({ type: 'session-created', session: { id: 'pickerremote' } });
+    await requestDaemon(paths.socket, { method: 'stop', sessionId: 'pickerremote' });
+    expect((await store.loadState()).activeSessionId).toBe('default');
+    await fake.emit(message('/use default'));
+    await requestDaemon(paths.socket, { method: 'stop', sessionId: 'cardremote' });
 
     const inactiveCompletion = await requestDaemon(paths.socket, {
       method: 'turnComplete',
@@ -172,7 +286,9 @@ rl.on('line', (line) => {
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(fake.markdowns).toHaveLength(manualMarkdownCount);
 
-    await runFile('tmux', ['kill-session', '-t', `=${secondSession.sessionName}`]);
+    expect(await fake.emitSignedAction({ ...stopAction, action: 'confirm', nonce: 'stop-confirm' })).toMatchObject({
+      type: 'session-picker', content: '已关闭 second。',
+    });
     await waitFor(async () => (await store.loadState()).sessions?.second === undefined);
     await fake.emit(message('/sessions'));
     expect(fake.sessionPickers.at(-1)?.sessions.map(({ id }) => id)).toEqual(['default']);
@@ -208,7 +324,7 @@ rl.on('line', (line) => {
     expect(coalesced.ok).toBe(true);
     await waitFor(async () => fake.markdowns.some(({ markdown }) => markdown.includes('LATEST CONCLUSION AFTER INTERMEDIATE TURN')));
     expect(fake.markdowns).toHaveLength(manualMarkdownCount + 1);
-    expect(fake.markdowns.at(-1)?.markdown).toContain('Codex 等待用户输入');
+    expect(fake.markdowns.at(-1)?.markdown).toContain('codex 等待用户输入');
     expect(fake.markdowns[0]?.markdown).not.toContain('FINAL CONCLUSION WITHOUT WORKED FOR');
 
     const duplicate = await requestDaemon(paths.socket, { method: 'turnComplete', candidate: finalCompletionCandidate });
@@ -227,8 +343,8 @@ rl.on('line', (line) => {
       const state = await store.loadState();
       return state.sessions?.default === undefined && state.activeSessionId === undefined;
     });
-    await waitFor(async () => fake.texts.some(({ text }) => text.includes('Codex/tmux pane 已退出')));
-  }, 10_000);
+    await waitFor(async () => fake.texts.some(({ text }) => text.includes('codex/tmux pane 已退出')));
+  }, 30_000);
 });
 
 class FakeGateway implements RemoteGateway {
@@ -236,8 +352,10 @@ class FakeGateway implements RemoteGateway {
   texts: Array<{ chatId: string; text: string }> = [];
   markdowns: Array<{ chatId: string; markdown: string }> = [];
   sessionPickers: Array<{ chatId: string; sessions: ManagedSession[]; activeSessionId?: string }> = [];
+  sessionCreateChats: string[] = [];
   statuses: Array<RuntimeStatus> = [];
   manualViews: ManualControlView[] = [];
+  startupFailures: SessionStartupFailure[] = [];
   failNextSessionPicker = false;
   connect = async (): Promise<void> => undefined;
   disconnect = async (): Promise<void> => undefined;
@@ -255,6 +373,12 @@ class FakeGateway implements RemoteGateway {
     }
     this.sessionPickers.push({ chatId, sessions, activeSessionId });
   };
+  sendResumePicker = async (): Promise<void> => undefined;
+  sendStartupConflict = async (): Promise<void> => undefined;
+  sendSessionCreate = async (chatId: string): Promise<void> => { this.sessionCreateChats.push(chatId); };
+  sendSessionStartupFailure = async (_chatId: string, failure: SessionStartupFailure): Promise<void> => {
+    this.startupFailures.push(failure);
+  };
   sendStopConfirmation = async (): Promise<void> => undefined;
   emit(value: NormalizedMessage): Promise<void> {
     if (!this.handler) throw new Error('gateway not connected');
@@ -267,6 +391,13 @@ class FakeGateway implements RemoteGateway {
   emitSignedAction(action: SignedAction): Promise<unknown> {
     if (!this.handler) throw new Error('gateway not connected');
     return this.handler.onAction({ operator: { openId: 'ou_owner' }, chatId: 'oc_owner' } as CardActionEvent, action);
+  }
+  emitSignedFormAction(action: SignedAction, formValue: Record<string, unknown>): Promise<unknown> {
+    if (!this.handler) throw new Error('gateway not connected');
+    return this.handler.onAction({
+      operator: { openId: 'ou_owner' }, chatId: 'oc_owner', messageId: 'om_form',
+      action: { formValue },
+    } as CardActionEvent, action);
   }
 }
 

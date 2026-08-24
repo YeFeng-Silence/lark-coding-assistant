@@ -1,8 +1,15 @@
 import type { AppConfig } from '../core/model.js';
 import type { ScreenDetection } from '../screen/detector.js';
 
-export const AGENT_IDS = ['codex', 'trae-cli', 'claude-code'] as const;
+export const AGENT_IDS = ['codex', 'traex', 'claude'] as const;
 export type AgentId = typeof AGENT_IDS[number];
+export type LegacyAgentId = 'trae-cli' | 'claude-code';
+
+export function normalizeAgentId(value: string): AgentId | undefined {
+  if (value === 'trae-cli') return 'traex';
+  if (value === 'claude-code') return 'claude';
+  return (AGENT_IDS as readonly string[]).includes(value) ? value as AgentId : undefined;
+}
 
 export type AgentResume =
   | { mode: 'picker'; all?: boolean }
@@ -21,6 +28,14 @@ export interface TurnCompleteCandidate {
   agentSessionId: string;
   cwd: string;
   lastAssistantMessage: string;
+}
+
+export interface AgentSessionStartedCandidate {
+  sessionId: string;
+  agent: AgentId;
+  agentSessionId: string;
+  cwd: string;
+  source?: string;
 }
 
 export interface LaunchInput {

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { readFile } from 'node:fs/promises';
 import { resolveResumeOption } from '../src/agents/resume.js';
 import { registrationDomains } from '../src/lark/registration.js';
 
@@ -22,5 +23,13 @@ describe('registrationDomains', () => {
       domain: 'accounts.feishu.cn',
       larkDomain: 'accounts.larksuite.com',
     });
+  });
+});
+
+describe('CLI package aliases', () => {
+  it('publishes lca as an equivalent executable', async () => {
+    const packageInfo = JSON.parse(await readFile('package.json', 'utf8')) as { bin: Record<string, string> };
+    expect(packageInfo.bin.lca).toBe('bin/lca.mjs');
+    expect(await readFile('bin/lca.mjs', 'utf8')).toContain("import '../dist/cli.js'");
   });
 });

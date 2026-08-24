@@ -4,10 +4,10 @@ import { codexStyleStopHookArgs } from './stop-hook.js';
 import type { AgentAdapter } from './types.js';
 
 export const traeCliAdapter: AgentAdapter = {
-  id: 'trae-cli',
-  displayName: 'Trae CLI',
+  id: 'traex',
+  displayName: 'traex',
   groupOrder: 20,
-  binary: (config) => config.agentBinaries['trae-cli'],
+  binary: (config) => config.agentBinaries.traex,
   versionArgs: ['--version'],
   buildLaunchArgs: ({ resume, stopHookCommand }) => [
     ...codexStyleStopHookArgs(stopHookCommand),

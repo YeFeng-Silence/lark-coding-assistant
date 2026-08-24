@@ -5,7 +5,8 @@ import type { ChoiceInteractionKind } from '../screen/detector.js';
 
 export interface SignedAction {
   v: 1;
-  kind: 'choice' | 'stop' | 'session' | 'manual';
+  kind: 'choice' | 'stop' | 'session' | 'session-stop' | 'session-create' | 'session-start-error'
+    | 'startup-conflict' | 'resume-picker' | 'manual';
   interactionKind?: ChoiceInteractionKind;
   sessionId?: string;
   manualMode?: 'explicit' | 'fallback';
@@ -92,10 +93,15 @@ function isSignedAction(value: unknown): value is SignedAction {
   if (!value || typeof value !== 'object') return false;
   const item = value as Record<string, unknown>;
   return item.v === 1
-    && (item.kind === 'choice' || item.kind === 'stop' || item.kind === 'session' || item.kind === 'manual')
+    && (item.kind === 'choice' || item.kind === 'stop' || item.kind === 'session' || item.kind === 'session-stop'
+      || item.kind === 'session-create' || item.kind === 'session-start-error' || item.kind === 'startup-conflict'
+      || item.kind === 'resume-picker' || item.kind === 'manual')
     && (item.kind !== 'choice' || item.interactionKind === 'approval' || item.interactionKind === 'question' || item.interactionKind === 'choice')
     && (item.kind !== 'manual' || (typeof item.sessionId === 'string'
       && (item.manualMode === 'explicit' || item.manualMode === 'fallback')))
+    && ((item.kind !== 'session-stop' && item.kind !== 'session-start-error'
+      && item.kind !== 'resume-picker' && item.kind !== 'startup-conflict')
+      || typeof item.sessionId === 'string')
     && typeof item.agent === 'string'
     && isAgentId(item.agent)
     && typeof item.action === 'string'

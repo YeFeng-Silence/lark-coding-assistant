@@ -111,12 +111,17 @@ describe('manual terminal control', () => {
   it('sends one watchdog card for a stable unresolved snapshot', async () => {
     const { internal, session } = harness();
     const views: ManualControlView[] = [];
+    const logs: string[] = [];
     internal.gateway = gateway({ sendManual: async (_chatId, view) => { views.push(view); } });
+    internal.log = async (message) => { logs.push(message); };
     internal.unresolvedCandidate = { key: `${session.id}:${session.paneId}:fp-1`, since: Date.now() - 4_000 };
     await internal.maybeNotifyUnresolved();
     await internal.maybeNotifyUnresolved();
     expect(views).toHaveLength(1);
     expect(views[0]).toMatchObject({ session: { id: 'assistant' }, screen: { state: 'unknown' } });
+    expect(logs).toEqual([
+      'manual fallback sent: session=assistant agent=codex pane=%1 state=unknown fingerprint=fp-1',
+    ]);
   });
 });
 
@@ -139,6 +144,7 @@ function harness(): {
   internal.interactionNotificationsSuppressed = 0;
   internal.unresolvedNotified = new Set();
   internal.closedManualCards = new Set();
+  internal.log = async () => undefined;
   internal.poll = async () => undefined;
   internal.gateway = gateway();
   return { daemon, internal, session };
@@ -152,6 +158,7 @@ interface InternalDaemon {
   unresolvedNotified: Set<string>;
   closedManualCards: Set<string>;
   gateway: RemoteGateway;
+  log(message: string): Promise<void>;
   tmux: {
     sendKey(paneId: string, key: string): Promise<void>;
     sendText(paneId: string, text: string, submit: boolean): Promise<void>;
@@ -203,6 +210,10 @@ function gateway(overrides: Partial<RemoteGateway> = {}): RemoteGateway {
     sendManual: async () => undefined,
     sendStatus: async () => undefined,
     sendSessionPicker: async () => undefined,
+    sendResumePicker: async () => undefined,
+    sendStartupConflict: async () => undefined,
+    sendSessionCreate: async () => undefined,
+    sendSessionStartupFailure: async () => undefined,
     sendStopConfirmation: async () => undefined,
     ...overrides,
   };

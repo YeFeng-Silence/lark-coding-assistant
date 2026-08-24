@@ -27,6 +27,37 @@ function formatKnownError(error: AppError, context: ErrorContext): string[] {
         `  lark-coding-assistant attach ${sessionId}`,
         '  lark-coding-assistant start --name <新名称>',
       ];
+    case 'AGENT_SESSION_IN_USE': {
+      const ownerSessionId = safeValue(context.ownerSessionId, '现有 session');
+      return [
+        `无法启动 session「${sessionId}」：对应的 Agent 原生 session 已由「${ownerSessionId}」连接。`,
+        '',
+        '请直接连接现有 session：',
+        `  lark-coding-assistant attach ${ownerSessionId}`,
+      ];
+    }
+    case 'AGENT_EXITED_DURING_STARTUP': {
+      const exitStatus = typeof context.exitStatus === 'number' ? `（退出码 ${context.exitStatus}）` : '';
+      return [
+        `Agent 启动后立即退出${exitStatus}，session「${sessionId}」未创建。`,
+        '',
+        '原始错误：',
+        safeValue(context.terminalExcerpt, 'Agent 未输出可用错误信息。'),
+        '',
+        '可查看日志或改为启动新会话：',
+        '  lark-coding-assistant logs',
+        `  lark-coding-assistant start --name ${sessionId} --agent ${safeValue(context.agent, 'codex')}`,
+      ];
+    }
+    case 'AGENT_IDENTITY_TIMEOUT':
+      return [
+        `无法确认恢复目标，session「${sessionId}」未创建。`,
+        'Agent 仍在运行，但 LCA 未能识别原生 session ID。',
+        '',
+        '临时 tmux 已清理，请查看日志后重试或启动新会话：',
+        '  lark-coding-assistant logs',
+        `  lark-coding-assistant start --name ${sessionId} --agent ${safeValue(context.agent, 'codex')}`,
+      ];
     case 'SESSION_NOT_FOUND':
       return [
         `找不到 session「${sessionId}」。`,
@@ -60,6 +91,19 @@ function formatKnownError(error: AppError, context: ErrorContext): string[] {
         '',
         '请运行 lark-coding-assistant --help 查看可用参数。',
       ];
+    case 'INVALID_RESUME':
+      return [
+        `恢复参数无效：${safeValue(context.reason, error.message)}`,
+        '',
+        '请只选择一种恢复方式，并检查历史 session ID。',
+      ];
+    case 'START_FAILED':
+      return [
+        `无法启动 session「${sessionId}」。`,
+        '',
+        '请检查工作目录、Agent 安装和 daemon 日志：',
+        '  lark-coding-assistant logs',
+      ];
     case 'DAEMON_UNAVAILABLE':
       return [
         '无法连接 bridge daemon。',
@@ -67,6 +111,13 @@ function formatKnownError(error: AppError, context: ErrorContext): string[] {
         '请尝试：',
         '  lark-coding-assistant daemon restart',
         '  lark-coding-assistant logs',
+      ];
+    case 'DAEMON_UNRESPONSIVE':
+      return [
+        'bridge daemon 进程仍在运行，但控制通道无响应。',
+        '',
+        '请重启 daemon；现有 coding-agent/tmux sessions 会保留：',
+        '  lark-coding-assistant daemon restart',
       ];
     case 'REQUEST_TIMEOUT':
       return [

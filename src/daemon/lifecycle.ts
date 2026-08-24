@@ -4,6 +4,20 @@ import type { AppPaths } from '../core/paths.js';
 import { runFile } from '../platform/process.js';
 import { requestDaemon } from './client.js';
 import type { DaemonInfo } from './protocol.js';
+import { AppError } from '../core/errors.js';
+
+export type DaemonHealth =
+  | { status: 'running'; info: DaemonInfo }
+  | { status: 'unresponsive'; pid: number }
+  | { status: 'stopped' };
+
+export interface DaemonHealthProbe {
+  ping(paths: AppPaths, timeoutMs: number): Promise<DaemonInfo | undefined>;
+  readPid(paths: AppPaths): Promise<number>;
+  processIsAlive(pid: number): boolean;
+  isCurrentDaemonProcess(pid: number): Promise<boolean>;
+  wait(ms: number): Promise<void>;
+}
 
 export async function daemonInfo(paths: AppPaths, timeoutMs = 500): Promise<DaemonInfo | undefined> {
   try {
@@ -22,6 +36,13 @@ export async function startDaemonProcess(
 ): Promise<DaemonInfo> {
   const existing = await daemonInfo(paths);
   if (existing) return existing;
+  const health = await daemonHealth(paths);
+  if (health.status === 'running') return health.info;
+  if (health.status === 'unresponsive') {
+    throw new AppError('DAEMON_UNRESPONSIVE', 'daemon process is alive but its control socket is unresponsive', {
+      pid: health.pid,
+    });
+  }
   await Promise.all([
     mkdir(paths.runtimeDir, { recursive: true, mode: 0o700 }),
     mkdir(paths.logsDir, { recursive: true, mode: 0o700 }),
@@ -45,6 +66,27 @@ export async function startDaemonProcess(
   }
   throw new Error('daemon did not become ready');
 }
+
+export async function daemonHealth(paths: AppPaths, probe: DaemonHealthProbe = defaultHealthProbe): Promise<DaemonHealth> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const info = await probe.ping(paths, 400);
+    if (info) return { status: 'running', info };
+    if (attempt < 2) await probe.wait(80);
+  }
+  const pid = await probe.readPid(paths);
+  if (validPid(pid) && probe.processIsAlive(pid) && await probe.isCurrentDaemonProcess(pid)) {
+    return { status: 'unresponsive', pid };
+  }
+  return { status: 'stopped' };
+}
+
+const defaultHealthProbe: DaemonHealthProbe = {
+  ping: daemonInfo,
+  readPid: async (paths) => Number.parseInt(await readFile(paths.pid, 'utf8').catch(() => ''), 10),
+  processIsAlive,
+  isCurrentDaemonProcess,
+  wait: delay,
+};
 
 export async function stopDaemonProcess(paths: AppPaths): Promise<boolean> {
   const info = await daemonInfo(paths);

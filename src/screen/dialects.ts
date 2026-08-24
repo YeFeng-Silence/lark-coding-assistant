@@ -19,13 +19,13 @@ export const CODEX_DIALECT: TerminalDialect = {
 
 export const TRAE_DIALECT: TerminalDialect = {
   ...CODEX_DIALECT,
-  id: 'trae-cli',
+  id: 'traex',
   headerPatterns: [...commonHeaders, /^\s*Question\s+\d+\/\d+/i],
   customInputControls: [/^(?:other|none of the above|add notes)$/i],
 };
 
 export const CLAUDE_DIALECT: TerminalDialect = {
-  id: 'claude-code',
+  id: 'claude',
   headerPatterns: [
     ...commonHeaders,
     /^\s*(?:←\s*)?[☐☑☒]\s+.+?(?:\s+✔\s+Submit\s*→)?\s*$/i,

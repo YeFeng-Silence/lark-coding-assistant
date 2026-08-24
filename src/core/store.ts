@@ -4,6 +4,7 @@ import type { AppConfig, AppSecrets, SessionState } from './model.js';
 import { emptyState } from './model.js';
 import type { AppPaths } from './paths.js';
 import { readJson, writeJsonAtomic } from './atomic-json.js';
+import { normalizeAgentId } from '../agents/types.js';
 
 export class AppStore {
   constructor(readonly paths: AppPaths) {}
@@ -19,8 +20,21 @@ export class AppStore {
     ]);
   }
 
-  loadConfig(): Promise<AppConfig | undefined> {
-    return readJson<AppConfig>(this.paths.config);
+  async loadConfig(): Promise<AppConfig | undefined> {
+    const config = await readJson<LegacyConfig>(this.paths.config);
+    if (!config) return undefined;
+    const binaries = config.agentBinaries ?? {};
+    return {
+      tenant: config.tenant,
+      appId: config.appId,
+      tmuxBinary: config.tmuxBinary,
+      agentBinaries: {
+        codex: binaries.codex ?? 'codex',
+        traex: binaries.traex ?? binaries['trae-cli'] ?? 'trae-cli',
+        claude: binaries.claude ?? binaries['claude-code'] ?? 'claude',
+      },
+      pollIntervalMs: config.pollIntervalMs,
+    };
   }
 
   saveConfig(config: AppConfig): Promise<void> {
@@ -36,12 +50,26 @@ export class AppStore {
   }
 
   async loadState(): Promise<SessionState> {
-    return (await readJson<SessionState>(this.paths.state)) ?? emptyState();
+    const state = await readJson<LegacyState>(this.paths.state);
+    if (!state) return emptyState();
+    const sessions = Object.fromEntries(Object.entries(state.sessions ?? {}).flatMap(([id, session]) => {
+      const agent = normalizeAgentId(session.agent);
+      return agent ? [[id, { ...session, agent }]] : [];
+    }));
+    return { ...state, sessions };
   }
 
   saveState(state: SessionState): Promise<void> {
     return writeJsonAtomic(this.paths.state, state);
   }
+}
+
+interface LegacyConfig extends Omit<AppConfig, 'agentBinaries'> {
+  agentBinaries: Partial<Record<'codex' | 'traex' | 'claude' | 'trae-cli' | 'claude-code', string>>;
+}
+
+interface LegacyState extends Omit<SessionState, 'sessions'> {
+  sessions?: Record<string, Omit<NonNullable<SessionState['sessions']>[string], 'agent'> & { agent: string }>;
 }
 
 export function createBindCode(): string {

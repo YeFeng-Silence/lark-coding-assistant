@@ -5,7 +5,7 @@ import type { AgentAdapter } from './types.js';
 
 export const codexAdapter: AgentAdapter = {
   id: 'codex',
-  displayName: 'Codex',
+  displayName: 'codex',
   groupOrder: 10,
   binary: (config) => config.agentBinaries.codex,
   versionArgs: ['--version'],

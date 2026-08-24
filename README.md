@@ -1,28 +1,30 @@
 # lark-coding-assistant
 
-`lark-coding-assistant` 是一个轻量的本地桥接工具：它把 Codex、Trae CLI 或 Claude Code 运行在受管 tmux session 中，让本地终端与飞书/Lark PersonalAgent 私聊操作同一个 coding agent 上下文。
+`lark-coding-assistant` 是一个轻量的本地桥接工具：它把 codex、traex 或 claude 运行在受管 tmux session 中，让本地终端与飞书/Lark PersonalAgent 私聊操作同一个 coding agent 上下文。
 
 远程消息、交互选择、查看输出和恢复现场都通过精确绑定的 tmux pane 完成；任务通知由 agent 原生 `Stop` hook 与终端停止输出状态共同确认。
 
 ## 主要能力
 
-- Codex、Trae CLI 与 Claude Code 可混合运行，默认使用 Codex；
-- 支持多个命名 session，一个飞书账号可在 `/sessions` 卡片中直接切换；
+- codex、traex 与 claude 可混合运行，默认使用 codex；
+- 支持多个命名 session，一个飞书账号可在 `/sessions` 卡片中直接切换或新建；
 - 普通飞书消息默认发送到当前 active session；
 - 支持 `/tail`、`/status`、`/stop`、远程处理审批与 Question，以及无法识别画面的手动遥控兜底；
 - 本地终端保持 attach 时，飞书仍可操作同一个 TUI；
 - 首次扫码后保存唯一 owner，后续通常无需绑定码；
 - 交互卡点击后原地更新，保留操作结果与处理时间；
-- daemon 单实例运行，升级 CLI 时自动更新 daemon，tmux session 不受影响。
+- daemon 单实例运行，可单独在后台启动；升级 CLI 时自动更新 daemon，tmux session 不受影响；
+- daemon 会从 tmux 元数据恢复仍在运行但尚未登记的受管 session。
+- 同一个 Agent 原生 session 只允许由一个存活的 LCA session 占用；重复恢复时会停止新 pane，并提示连接已有 session。
 
-远程审批不按 Codex、Trae CLI 或 Claude Code 版本号限制。bridge 只有在当前 TUI 被高置信度识别为结构化交互，并且选项、默认光标和提交按键映射完整时才发送飞书交互卡。
+远程审批不按 codex、traex 或 claude 版本号限制。bridge 只有在当前 TUI 被高置信度识别为结构化交互，并且选项、默认光标和提交按键映射完整时才发送飞书交互卡。
 
 ## 环境要求
 
 - macOS 或 Linux
 - Node.js 20.12+
 - tmux
-- Codex CLI、Trae CLI 和/或 Claude Code
+- codex、traex 和/或 claude
 - 可访问飞书或 Lark Open Platform
 
 检查环境：
@@ -43,9 +45,9 @@ claude --version
 
 | Coding agent | 推荐版本 | 版本命令 |
 | --- | --- | --- |
-| Codex CLI | `0.148.0` | `codex --version` |
-| Trae CLI | `0.201.4` | `trae-cli --version` |
-| Claude Code | `2.1.237` | `claude --version` |
+| codex | `0.148.0` | `codex --version` |
+| traex | `0.201.5` | `trae-cli --version` |
+| claude | `2.1.241` | `claude --version` |
 
 这些是已验证的推荐版本，不是强制版本锁定。其他版本通常也可以运行；如果新版调整了 TUI 文案或按键交互，结构化卡片可能暂时无法识别，此时仍可通过 `/tail` 和手动遥控模式完成操作。
 
@@ -67,39 +69,41 @@ npm install -g lark-coding-assistant@latest && lark-coding-assistant init
 
 配置保存在 `~/.lark-coding-assistant`。App Secret 只写入本机 `secrets.json`，文件权限为 `0600`。
 
+安装后可使用完整命令 `lark-coding-assistant`，也可使用等价的短命令 `lca`。下文示例优先使用 `lca`。
+
 ## 快速开始
 
-默认启动 Codex，并立即 attach：
+默认启动 codex，并立即 attach：
 
 ```bash
 cd ~/workspace/my-project
-lark-coding-assistant start
+lca start
 ```
 
-启动 Trae CLI：
+启动 traex：
 
 ```bash
-lark-coding-assistant start --agent trae-cli
+lca start --agent traex
 ```
 
-启动 Claude Code：
+启动 claude：
 
 ```bash
-lark-coding-assistant start --agent claude-code
+lca start --agent claude
 ```
 
 程序会启动唯一 bridge daemon、创建 `default` tmux session、向 agent 注入 `Stop` hook，然后 attach 当前终端。打开 PersonalAgent 私聊直接发消息即可自动连接，不需要先 detach，通常也不需要绑定码。
 
-Codex 与 Trae CLI 会使用其面向自动化的 `--dangerously-bypass-hook-trust` 参数运行 bridge 固定注入的 Stop hook，避免每次新建 session 都出现 hook 信任确认。这个参数只影响 hook 信任，不会关闭 agent 自身的命令审批。
+codex 与 traex 会使用其面向自动化的 `--dangerously-bypass-hook-trust` 参数运行 bridge 固定注入的 Stop hook，避免每次新建 session 都出现 hook 信任确认。这个参数只影响 hook 信任，不会关闭 agent 自身的命令审批。
 
 ## 多 agent、多 session
 
 每个 session 必须使用唯一名称：
 
 ```bash
-lark-coding-assistant start --name api --agent codex --cwd ~/workspace/api
-lark-coding-assistant start --name web --agent trae-cli --cwd ~/workspace/web
-lark-coding-assistant start --name docs --agent claude-code --cwd ~/workspace/docs
+lca start --name api --agent codex --cwd ~/workspace/api
+lca start --name web --agent traex --cwd ~/workspace/web
+lca start --name docs --agent claude --cwd ~/workspace/docs
 ```
 
 名称只允许字母、数字、下划线和短横线，最长 40 个字符。不指定名称时使用 `default`。
@@ -110,7 +114,7 @@ lark-coding-assistant start --name docs --agent claude-code --cwd ~/workspace/do
 /sessions
 ```
 
-机器人会发送一张交互卡，按 Codex、Trae CLI、Claude Code 分组展示仍存活的 session。`● 当前` 表示 active session，点击其他 session 的“连接”按钮即可切换；成功后卡片会留下操作记录。也可使用：
+机器人会发送一张交互卡，按 codex、traex、claude 分组展示仍存活的 session，并显示每个项目的绝对路径。`● 当前` 表示 active session，点击其他 session 的“连接”按钮即可切换，点击“关闭”可停止对应 agent 和 tmux session；也可点击“新建 Session”，填写名称、Agent、绝对工作目录和恢复方式。创建成功后会自动连接；原 session 列表仍可查看、连接和关闭，只会禁用已经使用过的“新建 Session”按钮。也可使用：
 
 ```text
 /use web
@@ -124,22 +128,26 @@ lark-coding-assistant start --name docs --agent claude-code --cwd ~/workspace/do
 
 ```bash
 # 打开当前工作目录的历史会话选择器
-lark-coding-assistant start --agent codex --resume
+lca start --agent codex --resume
 
 # 恢复最近会话
-lark-coding-assistant start --agent trae-cli --resume-last
+lca start --agent traex --resume-last
 
 # 按 agent session ID 恢复
-lark-coding-assistant start --agent trae-cli --resume <session-id>
+lca start --agent traex --resume <session-id>
 
-# Claude Code：恢复最近会话
-lark-coding-assistant start --agent claude-code --resume-last
+# claude：恢复最近会话
+lca start --agent claude --resume-last
 
 # 选择器显示其他工作目录的会话
-lark-coding-assistant start --agent codex --resume-all
+lca start --agent codex --resume-all
 ```
 
-`--name` 是 bridge 管理的 tmux session 名；`--resume <session-id>` 是 coding agent 自己的历史 session ID，两者不是同一个概念。Claude Code 的 `--resume-all` 与 `--resume` 都会打开其原生恢复选择器。
+`--name` 是 bridge 管理的 tmux session 名；`--resume <session-id>` 是 coding agent 自己的历史 session ID，两者不是同一个概念。claude 的 `--resume-all` 与 `--resume` 都会打开其原生恢复选择器。
+
+飞书只提供两种恢复方式：新会话，或打开 agent 原生 Resume Picker。选择 Resume Picker 后，bridge 会读取 codex、traex 或 claude 当前展示的历史会话列表并生成飞书卡片供选择；不会要求在飞书输入历史 Session ID，也不会直接把原始 picker 交给手动遥控。卡片会显示当前位置与总数，只有存在未展示的候选项时才出现翻页按钮。新旧版本 claude 的 Resume Picker 标题格式均可识别。
+
+启动结果、session 列表、状态卡片和失败提示中的工作目录统一显示绝对路径。Resume Picker 启动失败时，失败卡片会提供“新建 Session”和“查看 Sessions”入口，原 session 列表不会因此失效。
 
 ## 本地终端与 tmux
 
@@ -148,15 +156,17 @@ lark-coding-assistant start --agent codex --resume-all
 重新进入：
 
 ```bash
-lark-coding-assistant attach default
-lark-coding-assistant attach web
+lca attach default
+lca attach web
 ```
 
 不要把 tmux detach 与飞书 `/detach` 混淆：前者只离开本地界面，后者会解除私聊绑定并关闭自动重连。
 
 ## 飞书/Lark 私聊命令
 
-- `/sessions`：按 agent 分组展示所有仍存活的 session，点击按钮直接切换。
+- `/sessions`：按 agent 分组展示所有仍存活的 session 及其绝对路径，可直接连接、关闭或打开新建表单。
+- `/start`：直接打开新建 Session 表单。
+- `/start <name> --agent <codex|traex|claude> --cwd <绝对路径> [--resume]`：用文本命令启动并自动连接新 session；包含空格的路径请加引号。使用 `--resume` 会打开原生 Resume Picker。飞书端不支持“恢复上次”或直接输入历史 Session ID。
 - `/use <name>`：用文本命令切换 session。
 - `/tail [20-300]`：返回当前 session 最近的终端输出，默认 80 行。
 - `/manual`：打开当前 active session 的手动终端遥控卡。
@@ -165,7 +175,7 @@ lark-coding-assistant attach web
 - `/submit <文本>`：向当前终端输入文本并按一次 Enter。
 - `/status`：显示当前 session、agent、tmux pane、画面状态和工作目录。
 - `/detach`：解除当前私聊绑定，agent 与 tmux 继续运行。
-- `/stop`：发送二次确认卡，确认后停止当前 agent 和 tmux session。
+- `/stop`：发送二次确认卡，确认后关闭当前 agent 和 tmux session。
 - `/attach <code>`：使用一次性绑定码重新绑定私聊。
 
 常见画面状态包括 `idle`、`running`、`approval`、`input`、`failed`、`exited` 和 `unknown`。审批、Question 和其他结构化编号选择会根据当前终端画面生成交互卡；画面无法安全识别时不会盲目提交操作。
@@ -174,26 +184,26 @@ lark-coding-assistant attach web
 
 ```bash
 # 启动和进入
-lark-coding-assistant start [--name <name>] [--agent codex|trae-cli|claude-code] [--cwd <path>] [--resume [session-id]|--resume-last|--resume-all]
-lark-coding-assistant attach [name]
+lca start [--name <name>] [--agent codex|traex|claude] [--cwd <path>] [--resume [session-id]|--resume-last|--resume-all]
+lca attach [name]
 
 # 状态和停止
-lark-coding-assistant status [name]
-lark-coding-assistant stop [name]
+lca status [name]
+lca stop [name]
 
 # 私聊绑定
-lark-coding-assistant bind-code
-lark-coding-assistant reset-owner
+lca bind-code
+lca reset-owner
 
 # 日志
-lark-coding-assistant logs
-lark-coding-assistant logs --lines 300
+lca logs
+lca logs --lines 300
 
 # bridge daemon
-lark-coding-assistant daemon status
-lark-coding-assistant daemon start
-lark-coding-assistant daemon stop
-lark-coding-assistant daemon restart
+lca daemon          # 仅启动后台 bridge daemon
+lca daemon status
+lca daemon stop
+lca daemon restart
 ```
 
 `daemon stop/restart` 只断开或恢复飞书连接，不停止受管 tmux session。顶层 `stop [name]` 才会停止对应 agent 和 tmux session。
@@ -202,7 +212,7 @@ lark-coding-assistant daemon restart
 
 首次扫码会保存可信 owner。后续启动会自动沿用该 owner 和私聊，通常不再需要绑定码。
 
-以下情况才需要 `lark-coding-assistant bind-code`：
+以下情况才需要 `lca bind-code`：
 
 - 曾在飞书发送 `/detach`；
 - 需要迁移到另一个私聊；
@@ -218,7 +228,7 @@ lark-coding-assistant daemon restart
 
 当 active agent 显示结构化编号选择时，bridge 会从当前终端画面识别标题、上下文、选项、光标位置、勾选状态和提交方式，并在飞书发送对应的审批、Question 或通用选择卡。卡片选项直接来自当前 TUI，不使用固定的按钮集合。
 
-识别结果会先归一化为与 agent 无关的交互语义：单选或多选、选择切换键、最终提交方式，以及可选的补充内容编辑器。后续卡片渲染和 tmux 操作只消费这些语义，不按 Codex、Trae CLI 或 Claude Code 分别实现提交流程。各 agent 的适配层只负责识别终端文案与按键提示，因此未来版本只要仍能明确展示选项状态和提交方式，就可以复用同一套执行逻辑。
+识别结果会先归一化为与 agent 无关的交互语义：单选或多选、选择切换键、最终提交方式，以及可选的补充内容编辑器。后续卡片渲染和 tmux 操作只消费这些语义，不按 codex、traex 或 claude 分别实现提交流程。各 agent 的适配层只负责识别终端文案与按键提示，因此未来版本只要仍能明确展示选项状态和提交方式，就可以复用同一套执行逻辑。
 
 单选会直接提交所选答案；多选采用事务式表单，勾选、取消和修改自定义内容只保存在飞书卡片中，不会逐项操作本地终端。只有点击“提交答案”后，bridge 才会一次读取完整表单、同步本地 CLI 的最终选择和自定义内容，并执行一次提交。如果 agent 随后显示 `Submit answers / Cancel` 等二次确认，原卡片会继续刷新为新的确认卡。“继续对话”等非答案操作仍即时同步。远程操作引起的输入、光标移动和勾选变化只更新原卡片，不会重复推送新的交互卡。
 
@@ -231,7 +241,7 @@ lark-coding-assistant daemon restart
 
 交互卡不会仅因等待时间较长而失效；只要同一个选择画面仍在等待，即使隔夜也可处理。画面、pane、agent 或 active session 变化后旧卡会立即失效。停止和 session 选择卡仍使用短时有效期。
 
-Codex、Trae CLI、Claude Code 的审批、Question 和其他编号选择统一使用同一套结构化识别与画面指纹校验；无法完整识别时不会盲目生成操作按钮。
+codex、traex、claude 的审批、Question 和其他编号选择统一使用同一套结构化识别与画面指纹校验；无法完整识别时不会盲目生成操作按钮。
 
 ## 手动遥控兜底
 
@@ -259,7 +269,7 @@ agent 正在审批、本地输入框已有草稿或画面未知时，普通消�
 
 ```bash
 npm install -g lark-coding-assistant@latest
-lark-coding-assistant daemon restart
+lca daemon restart
 ```
 
 如果升级后直接执行 `start`，CLI 会自动比较自身与 daemon 版本并优雅更新 daemon，不停止现有 tmux session。
@@ -316,9 +326,9 @@ LARK_CODING_ASSISTANT_DEBUG=1 lark-coding-assistant <command>
 
 通常是 agent 正在审批、本地输入框已有草稿或画面无法识别。发送 `/tail` 查看当前状态。
 
-### 审批卡显示已失效
+### 卡片或按钮显示已失效
 
-说明 agent、active session、pane、审批画面或 nonce 已变化。发送 `/tail` 查看并等待新卡。
+说明卡片有效期已过，或 agent、active session、pane、交互画面、nonce 已变化。bridge 会尽量把原卡片更新为带有“卡片已失效”提示的只读状态；如果平台拒绝更新，则发送文字提示。请重新发送对应命令获取新卡：session 操作使用 `/sessions`，审批或 Question 可先用 `/tail` 确认当前画面并等待新卡。
 
 ### 关闭本地终端后 session 还在吗
 

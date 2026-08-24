@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeStopEvent } from '../../src/agents/stop-event.js';
+import { normalizeSessionStartEvent, normalizeStopEvent } from '../../src/agents/stop-event.js';
 
 describe('Stop event normalization', () => {
+  it('normalizes a SessionStart payload with the native agent session id', () => {
+    expect(normalizeSessionStartEvent('bridge-session', 'traex', {
+      hook_event_name: 'SessionStart', session_id: 'native-thread', cwd: '/work/app', source: 'resume',
+    })).toEqual({
+      sessionId: 'bridge-session', agent: 'traex', agentSessionId: 'native-thread', cwd: '/work/app', source: 'resume',
+    });
+  });
   it.each([
     ['Codex', {
       session_id: 'codex-thread', turn_id: 'codex-turn', cwd: '/work/codex',

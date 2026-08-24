@@ -1,7 +1,9 @@
 import { codexAdapter } from './codex.js';
 import { traeCliAdapter } from './trae-cli.js';
 import { claudeCodeAdapter } from './claude-code.js';
-import { AGENT_IDS, type AgentAdapter, type AgentId } from './types.js';
+import { normalizeAgentId, type AgentAdapter, type AgentId } from './types.js';
+
+export { normalizeAgentId } from './types.js';
 
 const adapters = new Map<AgentId, AgentAdapter>([
   [codexAdapter.id, codexAdapter],
@@ -20,5 +22,5 @@ export function listAgentAdapters(): AgentAdapter[] {
 }
 
 export function isAgentId(value: string): value is AgentId {
-  return (AGENT_IDS as readonly string[]).includes(value);
+  return normalizeAgentId(value) === value;
 }

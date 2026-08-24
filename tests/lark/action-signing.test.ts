@@ -33,7 +33,7 @@ describe('ActionSigner', () => {
     let now = 1000;
     const signer = new ActionSigner('secret', () => now);
     const action = signer.sign({
-      kind: 'choice', interactionKind: 'question', agent: 'trae-cli', action: '2', paneId: '%1', fingerprint: 'question', chatId: 'oc_1',
+      kind: 'choice', interactionKind: 'question', agent: 'traex', action: '2', paneId: '%1', fingerprint: 'question', chatId: 'oc_1',
     }, 50);
     now = 24 * 60 * 60_000;
     expect(signer.verify(action, 'oc_1')).toEqual(action);
@@ -70,7 +70,7 @@ describe('ActionSigner', () => {
   it('signs and verifies a session selection action', () => {
     const signer = new ActionSigner('secret', () => 1000);
     const action = signer.sign({
-      kind: 'session', agent: 'trae-cli', action: 'backend', paneId: '%2', fingerprint: '123', chatId: 'oc_1',
+      kind: 'session', agent: 'traex', action: 'backend', paneId: '%2', fingerprint: '123', chatId: 'oc_1',
     });
     expect(signer.verify(action, 'oc_1')).toEqual(action);
   });
@@ -83,5 +83,16 @@ describe('ActionSigner', () => {
     });
     expect(signer.verify({ ...action, sessionId: 'other' }, 'oc_1')).toBeUndefined();
     expect(signer.verify(action, 'oc_1')).toEqual(action);
+  });
+
+  it('binds resume and stop actions to one LCA session', () => {
+    const signer = new ActionSigner('secret', () => 1000);
+    for (const kind of ['resume-picker', 'session-stop', 'session-start-error', 'startup-conflict'] as const) {
+      const action = signer.sign({
+        kind, sessionId: 'restore', agent: 'codex', action: 'confirm', paneId: '%9', fingerprint: 'fp', chatId: 'oc_1',
+      });
+      expect(signer.verify({ ...action, sessionId: 'other' }, 'oc_1')).toBeUndefined();
+      expect(signer.verify(action, 'oc_1')).toEqual(action);
+    }
   });
 });

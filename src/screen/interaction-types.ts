@@ -51,7 +51,7 @@ export interface ChoiceInteraction {
 }
 
 export interface TerminalDialect {
-  id: 'codex' | 'trae-cli' | 'claude-code';
+  id: 'codex' | 'traex' | 'claude';
   headerPatterns: readonly RegExp[];
   footerPatterns: readonly RegExp[];
   footerlessChoiceHeaders?: readonly RegExp[];

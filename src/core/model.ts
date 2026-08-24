@@ -22,6 +22,7 @@ export interface ManagedSession {
   paneId: string;
   cwd: string;
   agentVersion: string;
+  agentSessionId?: string;
   updatedAt: number;
 }
 

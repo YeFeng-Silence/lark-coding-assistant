@@ -26,7 +26,12 @@ describe('CLI error formatting', () => {
     ['INVALID_CWD', { cwd: '/missing' }, '工作目录不可用：/missing'],
     ['BINARY_NOT_FOUND', { binary: 'codex' }, '找不到所需命令：codex'],
     ['INVALID_OPTIONS', { reason: '参数冲突' }, '命令参数无效：参数冲突'],
+    ['INVALID_RESUME', { reason: '恢复方式冲突' }, '恢复参数无效：恢复方式冲突'],
+    ['START_FAILED', { sessionId: 'api' }, '无法启动 session「api」'],
+    ['AGENT_EXITED_DURING_STARTUP', { sessionId: 'api', agent: 'codex', exitStatus: 1, terminalExcerpt: 'Error: active writer' }, 'Error: active writer'],
+    ['AGENT_IDENTITY_TIMEOUT', { sessionId: 'api' }, '无法确认恢复目标'],
     ['DAEMON_UNAVAILABLE', {}, 'lark-coding-assistant daemon restart'],
+    ['DAEMON_UNRESPONSIVE', {}, '进程仍在运行，但控制通道无响应'],
     ['REQUEST_TIMEOUT', {}, 'bridge daemon 未及时响应'],
     ['UNKNOWN', { operation: 'start' }, '操作失败：启动 session 时发生异常'],
   ] as const)('renders %s', (code, context, expected) => {
@@ -72,7 +77,7 @@ describe('CLI process error boundary', () => {
     expect(invalidCwd.stderr).not.toContain('Node.js v');
 
     const conflicting = await runCli(['start', '--resume', '--resume-last'], home);
-    expect(conflicting.stderr).toContain('命令参数无效');
+    expect(conflicting.stderr).toContain('恢复参数无效');
     expect(conflicting.stderr).toContain('不能同时使用');
 
     const notInitialized = await runCli(['start', '--cwd', home], home);
@@ -87,6 +92,14 @@ describe('CLI process error boundary', () => {
     expect(result.stderr).toContain('无法连接 bridge daemon');
     expect(result.stderr).not.toContain('ENOENT');
     expect(result.stderr).not.toContain('connect');
+  });
+
+  it('treats bare daemon as daemon start', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'lca-cli-daemon-default-'));
+    const result = await runCli(['daemon'], home);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('尚未完成初始化');
+    expect(result.stdout).not.toContain('Usage:');
   });
 });
 

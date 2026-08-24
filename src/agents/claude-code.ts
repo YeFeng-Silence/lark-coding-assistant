@@ -4,10 +4,10 @@ import { claudeStopHookArgs } from './stop-hook.js';
 import type { AgentAdapter } from './types.js';
 
 export const claudeCodeAdapter: AgentAdapter = {
-  id: 'claude-code',
-  displayName: 'Claude Code',
+  id: 'claude',
+  displayName: 'claude',
   groupOrder: 30,
-  binary: (config) => config.agentBinaries['claude-code'],
+  binary: (config) => config.agentBinaries.claude,
   versionArgs: ['--version'],
   buildLaunchArgs: ({ resume, stopHookCommand }) => [
     ...claudeStopHookArgs(stopHookCommand),

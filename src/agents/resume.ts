@@ -5,7 +5,7 @@ export function resolveResumeOption(options: ResumeOptions): AgentResume | undef
   const modes = [options.resume !== undefined, options.resumeLast, options.resumeAll].filter(Boolean).length;
   if (modes > 1) {
     throw new AppError(
-      'INVALID_OPTIONS',
+      'INVALID_RESUME',
       '--resume, --resume-last, and --resume-all cannot be used together',
       { reason: '--resume、--resume-last 和 --resume-all 不能同时使用' },
     );

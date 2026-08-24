@@ -1,4 +1,27 @@
-import type { TurnCompleteCandidate } from './types.js';
+import type { AgentId, AgentSessionStartedCandidate, TurnCompleteCandidate } from './types.js';
+
+export function normalizeSessionStartEvent(
+  bridgeSessionId: string,
+  agent: AgentId,
+  value: unknown,
+): AgentSessionStartedCandidate | undefined {
+  if (!bridgeSessionId || !value || typeof value !== 'object') return undefined;
+  const event = value as Record<string, unknown>;
+  if (event.hook_event_name !== 'SessionStart') return undefined;
+  const agentSessionId = stringField(event, 'session_id');
+  const cwd = stringField(event, 'cwd');
+  if (!agentSessionId || !cwd) return undefined;
+  return { sessionId: bridgeSessionId, agent, agentSessionId, cwd, source: stringField(event, 'source') };
+}
+
+export function validSessionStartCandidate(value: unknown): value is AgentSessionStartedCandidate {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate.sessionId === 'string' && candidate.sessionId.length > 0
+    && (candidate.agent === 'codex' || candidate.agent === 'traex' || candidate.agent === 'claude')
+    && typeof candidate.agentSessionId === 'string' && candidate.agentSessionId.length > 0
+    && typeof candidate.cwd === 'string' && candidate.cwd.length > 0;
+}
 
 export function normalizeStopEvent(
   bridgeSessionId: string,

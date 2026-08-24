@@ -1,11 +1,12 @@
-import { homedir } from 'node:os';
 import type { ScreenDetection } from '../screen/detector.js';
 import type { ManagedSession } from '../core/model.js';
 import type { ActionSigner } from './action-signing.js';
 import type { SignedAction } from './action-signing.js';
 import { getAgentAdapter, listAgentAdapters } from '../agents/registry.js';
 import type { AgentId } from '../agents/types.js';
+import type { ResumePickerView } from '../screen/resume-picker.js';
 import type { RuntimeStatus } from '../daemon/protocol.js';
+import type { SessionStartupFailure } from '../session/startup-failure.js';
 
 export function choiceCard(
   chatId: string,
@@ -308,7 +309,7 @@ export function statusCard(status: RuntimeStatus): object {
 
   const adapter = getAgentAdapter(session.agent);
   const visual = statusVisual(status);
-  const path = formatDisplayPath(session.cwd);
+  const path = session.cwd;
   return {
     schema: '2.0',
     config: { update_multi: true },
@@ -351,11 +352,13 @@ export function sessionPickerCard(
   sessions: ManagedSession[],
   activeSessionId: string | undefined,
   signer: ActionSigner,
+  confirmingStopSessionId?: string,
+  allowCreate = true,
 ): object {
   const groups = listAgentAdapters()
     .map((adapter) => ({ adapter, sessions: sessions.filter((session) => session.agent === adapter.id) }))
     .filter(({ sessions: group }) => group.length > 0);
-  const elements = groups.flatMap(({ adapter, sessions: group }, groupIndex) => [
+  const elements: object[] = groups.flatMap(({ adapter, sessions: group }, groupIndex) => [
     ...(groupIndex > 0 ? [{ tag: 'hr', margin: '6px 0px' }] : []),
     {
       tag: 'markdown',
@@ -363,8 +366,34 @@ export function sessionPickerCard(
       text_size: 'heading',
       margin: '2px 0px 0px 0px',
     },
-    ...group.map((session) => sessionCard(chatId, session, session.id === activeSessionId, signer)),
+    ...group.map((session) => sessionCard(
+      chatId,
+      session,
+      session.id === activeSessionId,
+      signer,
+      confirmingStopSessionId === session.id,
+    )),
   ]);
+  if (elements.length > 0) elements.push({ tag: 'hr', margin: '8px 0px' });
+  else elements.push({ tag: 'markdown', content: '暂无可连接的 Coding Session，可以直接新建一个。' });
+  elements.push(allowCreate
+    ? {
+        tag: 'button',
+        text: { tag: 'plain_text', content: '＋ 新建 Session' },
+        type: 'primary',
+        width: 'fill',
+        size: 'medium',
+        behaviors: [{
+          type: 'callback',
+          value: signer.sign({
+            kind: 'session-create', agent: 'codex', action: 'open', paneId: '', fingerprint: 'create', chatId,
+          }, 10 * 60_000),
+        }],
+      }
+    : {
+        tag: 'markdown',
+        content: '✅ 新建 Session 表单已发送；仍可查看或操作上方 Session。',
+      });
   return {
     schema: '2.0',
     config: { update_multi: true },
@@ -372,11 +401,123 @@ export function sessionPickerCard(
     body: {
       vertical_spacing: '10px',
       padding: '12px',
-      elements: elements.length > 0
-        ? elements
-        : [{ tag: 'markdown', content: '暂无可连接的 Coding Session。' }],
+      elements,
     },
   };
+}
+
+export const SESSION_CREATE_SUBMIT_ACTION = 'session_create_submit';
+export const SESSION_CREATE_NAME_FIELD = 'session_name';
+export const SESSION_CREATE_AGENT_FIELD = 'session_agent';
+export const SESSION_CREATE_CWD_FIELD = 'session_cwd';
+export const SESSION_CREATE_RESUME_FIELD = 'session_resume';
+
+export function sessionCreateCard(): object {
+  return cardElements('新建 Coding Session', [
+    { tag: 'markdown', content: '在本机受管 tmux 中启动一个新会话；创建成功后会自动连接。' },
+    {
+      tag: 'form', name: 'session_create_form', direction: 'vertical', vertical_spacing: '10px', elements: [
+        {
+          tag: 'input', name: SESSION_CREATE_NAME_FIELD, required: true,
+          placeholder: { tag: 'plain_text', content: 'Session 名称，例如 helix' },
+          label: { tag: 'plain_text', content: 'Session 名称' },
+        },
+        {
+          tag: 'select_static', name: SESSION_CREATE_AGENT_FIELD, required: true,
+          placeholder: { tag: 'plain_text', content: '选择 Agent' },
+          initial_option: 'codex',
+          options: listAgentAdapters().map((adapter) => ({
+            text: { tag: 'plain_text', content: adapter.displayName }, value: adapter.id,
+          })),
+        },
+        {
+          tag: 'input', name: SESSION_CREATE_CWD_FIELD, required: true,
+          placeholder: { tag: 'plain_text', content: '/absolute/path/to/project' },
+          label: { tag: 'plain_text', content: '工作目录（必须为绝对路径）' },
+        },
+        {
+          tag: 'select_static', name: SESSION_CREATE_RESUME_FIELD,
+          placeholder: { tag: 'plain_text', content: '选择启动方式' },
+          initial_option: 'new',
+          options: [
+            { text: { tag: 'plain_text', content: '新会话' }, value: 'new' },
+            { text: { tag: 'plain_text', content: '打开原生 Resume Picker' }, value: 'picker' },
+          ],
+        },
+        {
+          tag: 'button', name: SESSION_CREATE_SUBMIT_ACTION,
+          text: { tag: 'plain_text', content: '启动并连接' }, type: 'primary', width: 'fill', size: 'medium',
+          form_action_type: 'submit',
+        },
+      ],
+    },
+  ]);
+}
+
+export function sessionCreateResultCard(
+  success: boolean,
+  content: string,
+  session?: Pick<ManagedSession, 'id' | 'agent' | 'cwd'>,
+): object {
+  const details = session
+    ? `\n\n**Session**  \`${escapeInlineCode(session.id)}\`\n**Agent**  ${escapeMarkdown(getAgentAdapter(session.agent).displayName)}\n**工作目录**  \`${escapeInlineCode(session.cwd)}\``
+    : '';
+  return cardElements(
+    success ? 'Session 已启动' : 'Session 启动失败',
+    [{ tag: 'markdown', content: `${success ? '✅' : '⚠️'} ${escapeMarkdown(content)}${details}` }],
+    success ? 'green' : 'red',
+  );
+}
+
+export function sessionCreateProgressCard(): object {
+  return cardElements('正在启动 Session', [
+    { tag: 'markdown', content: '⏳ 正在创建 tmux pane，并确认 Agent 和原生 Session 状态…' },
+  ], 'blue');
+}
+
+export function sessionCreateOpenedCard(): object {
+  return cardElements('新建表单已打开', [{
+    tag: 'markdown',
+    content: '✅ 请在最新发送的“新建 Coding Session”卡片中继续操作。\n\n如需查看 Session，请发送 `/sessions`。',
+  }], 'grey');
+}
+
+export function sessionCreateFailureCard(chatId: string, content: string, signer: ActionSigner): object {
+  return cardElements('Session 启动失败', [
+    { tag: 'markdown', content: `⚠️ ${escapeMarkdown(content)}` },
+    ...sessionFailureActions(chatId, '', 'codex', signer),
+  ], 'red');
+}
+
+export function sessionStartupFailureCard(
+  chatId: string,
+  failure: SessionStartupFailure,
+  signer: ActionSigner,
+): object {
+  const exitStatus = failure.exitStatus === undefined ? '未知' : String(failure.exitStatus);
+  return cardElements('Session 启动失败', [
+    {
+      tag: 'markdown',
+      content: `⚠️ **Session**  \`${escapeInlineCode(failure.sessionId)}\`\n**Agent**  ${escapeMarkdown(getAgentAdapter(failure.agent).displayName)}\n**退出码**  \`${exitStatus}\``,
+    },
+    { tag: 'markdown', content: `**原始错误**\n\n\`\`\`text\n${escapeFence(failure.terminalExcerpt)}\n\`\`\`` },
+    ...sessionFailureActions(chatId, failure.sessionId, failure.agent, signer),
+  ], 'red');
+}
+
+function sessionFailureActions(chatId: string, sessionId: string, agent: AgentId, signer: ActionSigner): object[] {
+  const common = {
+    kind: 'session-start-error' as const,
+    sessionId,
+    agent,
+    paneId: '',
+    fingerprint: 'startup-error',
+    chatId,
+  };
+  return [
+    actionButton('新建 Session', 'primary', signer.sign({ ...common, action: 'create' }, 10 * 60_000)),
+    actionButton('查看 Sessions', 'default', signer.sign({ ...common, action: 'sessions' }, 10 * 60_000)),
+  ];
 }
 
 function sessionCard(
@@ -384,35 +525,18 @@ function sessionCard(
   session: ManagedSession,
   active: boolean,
   signer: ActionSigner,
+  confirmingStop = false,
 ): object {
   const content = [
     active
       ? `**${escapeMarkdown(session.id)}**  <text_tag color='green'>● 当前连接</text_tag>`
       : `**${escapeMarkdown(session.id)}**`,
-    `📁 \`${escapeInlineCode(formatDisplayPath(session.cwd))}\``,
+    `📁 \`${escapeInlineCode(session.cwd)}\``,
   ].join('\n\n');
   const elements: object[] = [{ tag: 'markdown', content }];
-  if (!active) {
-    elements.push({
-      tag: 'button',
-      text: { tag: 'plain_text', content: `连接 ${session.id}` },
-      type: 'primary',
-      width: 'fill',
-      size: 'medium',
-      margin: '2px 0px 0px 0px',
-      behaviors: [{
-        type: 'callback',
-        value: signer.sign({
-          kind: 'session',
-          agent: session.agent,
-          action: session.id,
-          paneId: session.paneId,
-          fingerprint: String(session.updatedAt),
-          chatId,
-        }),
-      }],
-    });
-  }
+  elements.push(confirmingStop
+    ? sessionStopConfirmation(chatId, session, signer)
+    : sessionActions(chatId, session, active, signer));
   const contentColumn = {
     tag: 'column',
     width: 'weighted',
@@ -439,20 +563,120 @@ function sessionCard(
   };
 }
 
-export function formatDisplayPath(path: string, home = homedir(), maxLength = 44): string {
-  const display = path === home
-    ? '~'
-    : path.startsWith(`${home}/`)
-      ? `~${path.slice(home.length)}`
-      : path;
-  if (display.length <= maxLength) return display;
-  const segments = display.split('/').filter(Boolean);
-  return segments.length <= 2 ? display : `…/${segments.slice(-2).join('/')}`;
+function sessionActions(chatId: string, session: ManagedSession, active: boolean, signer: ActionSigner): object {
+  const buttons: object[] = [];
+  if (!active) buttons.push(actionButton(`连接 ${session.id}`, 'primary', signer.sign({
+    kind: 'session', agent: session.agent, action: session.id, paneId: session.paneId,
+    fingerprint: String(session.updatedAt), chatId,
+  })));
+  buttons.push(actionButton('关闭', 'danger', signer.sign({
+    kind: 'session-stop', sessionId: session.id, agent: session.agent, action: 'request', paneId: session.paneId,
+    fingerprint: String(session.updatedAt), chatId,
+  })));
+  return buttonRow(buttons);
+}
+
+function sessionStopConfirmation(chatId: string, session: ManagedSession, signer: ActionSigner): object {
+  const common = {
+    kind: 'session-stop' as const, sessionId: session.id, agent: session.agent, paneId: session.paneId,
+    fingerprint: String(session.updatedAt), chatId,
+  };
+  return {
+    tag: 'column_set', flex_mode: 'none', columns: [{
+      tag: 'column', width: 'weighted', weight: 1, background_style: 'grey', padding: '8px 10px',
+      vertical_spacing: '6px',
+      elements: [
+        { tag: 'markdown', content: `⚠️ 确认关闭 **${escapeMarkdown(session.id)}**？Agent 和 tmux session 将退出。` },
+        buttonRow([
+          actionButton('确认关闭', 'danger', signer.sign({ ...common, action: 'confirm' })),
+          actionButton('取消', 'default', signer.sign({ ...common, action: 'cancel' })),
+        ]),
+      ],
+    }],
+  };
+}
+
+export function resumePickerCard(
+  chatId: string,
+  session: ManagedSession,
+  picker: ResumePickerView,
+  signer: ActionSigner,
+): object {
+  const common = {
+    kind: 'resume-picker' as const, sessionId: session.id, agent: session.agent, paneId: session.paneId,
+    fingerprint: picker.fingerprint, chatId,
+  };
+  const optionElements = picker.options.map((option) => ({
+    tag: 'column_set', flex_mode: 'none', columns: [{
+      tag: 'column', width: 'weighted', weight: 1, background_style: 'grey',
+      padding: '9px 10px', vertical_spacing: '5px',
+      elements: [
+        { tag: 'markdown', content: `${option.selected ? '●' : '○'} **${escapeMarkdown(option.label)}**${option.detail ? `\n${escapeMarkdown(option.detail)}` : ''}` },
+        actionButton('恢复此 Session', option.selected ? 'primary' : 'default', signer.sign({ ...common, action: `select:${option.id}` }, 10 * 60_000)),
+      ],
+    }],
+  }));
+  const navigation = [
+    ...(picker.canPrevious ? [actionButton('上一页', 'default', signer.sign({ ...common, action: 'previous' }, 10 * 60_000))] : []),
+    actionButton('刷新', 'default', signer.sign({ ...common, action: 'refresh' }, 10 * 60_000)),
+    ...(picker.canNext ? [actionButton('下一页', 'default', signer.sign({ ...common, action: 'next' }, 10 * 60_000))] : []),
+    actionButton('取消', 'danger', signer.sign({ ...common, action: 'cancel' }, 10 * 60_000)),
+  ];
+  return cardElements(
+    '选择要恢复的 Session',
+    [
+      { tag: 'markdown', content: `**${escapeMarkdown(session.id)} · ${escapeMarkdown(getAgentAdapter(session.agent).displayName)}**${picker.position && picker.total ? `  ·  当前 ${picker.position}/${picker.total}` : ''}` },
+      ...optionElements,
+      buttonRow(navigation),
+    ],
+    'yellow',
+  );
+}
+
+export function startupConflictCard(
+  chatId: string,
+  requested: Pick<ManagedSession, 'id' | 'agent' | 'cwd'>,
+  owner: ManagedSession,
+  signer: ActionSigner,
+): object {
+  const common = {
+    kind: 'startup-conflict' as const,
+    sessionId: requested.id,
+    agent: requested.agent,
+    paneId: owner.paneId,
+    fingerprint: String(owner.updatedAt),
+    chatId,
+  };
+  return cardElements('Session 已由其他连接占用', [
+    {
+      tag: 'markdown',
+      content: `要恢复的 **${escapeMarkdown(requested.agent)}** 原生 Session 已由 LCA Session **${escapeMarkdown(owner.id)}** 连接。\n\n**请求名称**  \`${escapeInlineCode(requested.id)}\`\n**工作目录**  \`${escapeInlineCode(requested.cwd)}\``,
+    },
+    buttonRow([
+      actionButton(`连接 ${owner.id}`, 'primary', signer.sign({ ...common, action: 'connect' }, 10 * 60_000)),
+      actionButton('启动新会话', 'default', signer.sign({ ...common, action: 'new' }, 10 * 60_000)),
+      actionButton('取消', 'danger', signer.sign({ ...common, action: 'cancel' }, 10 * 60_000)),
+    ]),
+  ], 'yellow');
+}
+
+function actionButton(text: string, type: string, value: SignedAction): object {
+  return {
+    tag: 'button', text: { tag: 'plain_text', content: text }, type, size: 'medium',
+    behaviors: [{ type: 'callback', value }],
+  };
+}
+
+function buttonRow(buttons: object[]): object {
+  return {
+    tag: 'column_set', flex_mode: 'none', horizontal_spacing: '8px', margin: '2px 0px 0px 0px',
+    columns: buttons.map((button) => ({ tag: 'column', width: 'weighted', weight: 1, elements: [button] })),
+  };
 }
 
 function agentMarker(agent: AgentId): string {
   if (agent === 'codex') return '🔵';
-  if (agent === 'trae-cli') return '🟣';
+  if (agent === 'traex') return '🟣';
   return '🟠';
 }
 
@@ -503,6 +727,13 @@ export function handledActionCard(
     `**处理时间**：${formatHandledAt(handledAt)}`,
   ].join('\n');
   return card(title, content, [], 'green');
+}
+
+export function expiredActionCard(): object {
+  return cardElements('卡片已失效', [{
+    tag: 'markdown',
+    content: '⚠️ 此卡片或按钮已过期、已处理，或 bridge daemon 已重启。\n\n请重新发送对应命令获取最新卡片；Session 相关操作可发送 `/sessions`。',
+  }], 'grey');
 }
 
 function card(title: string, content: string, buttons: object[], template = 'blue'): object {

@@ -1,0 +1,185 @@
+import type { AgentId } from '../agents/types.js';
+import type { ManagedSession, SessionState } from '../core/model.js';
+import type { TmuxInspectResult, TmuxPane, TmuxSessionMetadata } from '../tmux/types.js';
+import { validSessionId } from './start-request.js';
+
+export interface SessionTmux {
+  inspectStatus(paneId: string): Promise<TmuxInspectResult>;
+  inspectSession(sessionName: string): Promise<TmuxInspectResult>;
+  listSessions(prefix: string): Promise<TmuxPane[]>;
+  readMetadata(sessionName: string): Promise<TmuxSessionMetadata | undefined>;
+  writeMetadata(sessionName: string, metadata: TmuxSessionMetadata): Promise<void>;
+}
+
+export interface ReconcileResult {
+  state: SessionState;
+  liveSessions: ManagedSession[];
+  removedActive?: ManagedSession;
+  changed: boolean;
+}
+
+export class SessionReconciler {
+  private readonly misses = new Map<string, number>();
+
+  constructor(
+    private readonly tmux: SessionTmux,
+    private readonly sessionPrefix = 'lark-coding-assistant',
+    private readonly missingThreshold = 3,
+    private readonly log: (message: string) => Promise<void> = async () => undefined,
+    private readonly resolveAgentVersion: (agent: AgentId) => Promise<string> = async () => 'unknown',
+  ) {}
+
+  async reconcile(input: SessionState, discover = false): Promise<ReconcileResult> {
+    const sessions = { ...input.sessions };
+    let changed = false;
+    for (const [id, session] of Object.entries(sessions)) {
+      const result = await this.confirm(session);
+      if (result.status === 'unavailable') {
+        await this.log(`tmux inspection unavailable for ${id}: ${errorMessage(result.error)}`);
+        continue;
+      }
+      if (result.status === 'live') {
+        this.misses.delete(id);
+        if (result.pane.paneId !== session.paneId || result.pane.sessionName !== session.sessionName) {
+          sessions[id] = { ...session, paneId: result.pane.paneId, sessionName: result.pane.sessionName, updatedAt: Date.now() };
+          changed = true;
+        }
+        continue;
+      }
+      const misses = (this.misses.get(id) ?? 0) + 1;
+      this.misses.set(id, misses);
+      if (misses < this.missingThreshold) continue;
+      delete sessions[id];
+      this.misses.delete(id);
+      changed = true;
+    }
+
+    if (discover) {
+      changed = await this.discover(sessions) || changed;
+    }
+
+    const activeSessionId = input.activeSessionId && sessions[input.activeSessionId]
+      ? input.activeSessionId
+      : Object.keys(sessions)[0];
+    if (activeSessionId !== input.activeSessionId) changed = true;
+    const removedActive = input.activeSessionId && !sessions[input.activeSessionId]
+      ? input.sessions?.[input.activeSessionId]
+      : undefined;
+    const state = changed
+      ? { ...input, sessions, activeSessionId, updatedAt: Date.now() }
+      : input;
+    return { state, liveSessions: Object.values(sessions), removedActive, changed };
+  }
+
+  private async confirm(session: ManagedSession): Promise<TmuxInspectResult> {
+    const direct = await this.tmux.inspectStatus(session.paneId);
+    if (direct.status === 'live' || direct.status === 'unavailable') return direct;
+    const byName = await this.tmux.inspectSession(session.sessionName);
+    if (byName.status === 'live' || byName.status === 'unavailable') return byName;
+    return byName.status === 'dead' ? byName : direct;
+  }
+
+  private async discover(sessions: Record<string, ManagedSession>): Promise<boolean> {
+    let panes: TmuxPane[];
+    try {
+      panes = await this.tmux.listSessions(`${this.sessionPrefix}-`);
+    } catch (error) {
+      await this.log(`tmux session discovery unavailable: ${errorMessage(error)}`);
+      return false;
+    }
+    let changed = false;
+    const seen = new Set<string>();
+    for (const pane of panes) {
+      if (seen.has(pane.sessionName) || pane.dead) continue;
+      seen.add(pane.sessionName);
+      const registered = Object.values(sessions).find((session) => session.sessionName === pane.sessionName);
+      if (registered) {
+        if (registered.paneId !== pane.paneId) {
+          sessions[registered.id] = { ...registered, paneId: pane.paneId, updatedAt: Date.now() };
+          changed = true;
+        }
+        if (!await this.tmux.readMetadata(pane.sessionName)) {
+          await this.writeMetadata(pane, registered).catch((error) => this.log(
+            `failed to backfill tmux metadata for ${registered.id}: ${errorMessage(error)}`,
+          ));
+        }
+        continue;
+      }
+
+      const metadata = await this.tmux.readMetadata(pane.sessionName);
+      const recovered = metadata
+        ? this.fromMetadata(pane, metadata)
+        : await this.fromLegacy(pane);
+      if (!recovered || sessions[recovered.id]) continue;
+      if (!metadata) {
+        try {
+          await this.writeMetadata(pane, recovered);
+        } catch (error) {
+          await this.log(`failed to persist recovered tmux metadata for ${recovered.id}: ${errorMessage(error)}`);
+          continue;
+        }
+      }
+      sessions[recovered.id] = recovered;
+      this.misses.delete(recovered.id);
+      changed = true;
+      await this.log(`recovered managed session ${recovered.id} from tmux`);
+    }
+    return changed;
+  }
+
+  private fromMetadata(pane: TmuxPane, metadata: TmuxSessionMetadata): ManagedSession | undefined {
+    if (!validSessionId(metadata.sessionId)
+      || pane.sessionName !== `${this.sessionPrefix}-${metadata.sessionId}`) return undefined;
+    return {
+      id: metadata.sessionId,
+      agent: metadata.agent,
+      sessionName: pane.sessionName,
+      paneId: pane.paneId,
+      cwd: metadata.cwd,
+      agentVersion: metadata.agentVersion,
+      agentSessionId: metadata.agentSessionId,
+      updatedAt: Date.now(),
+    };
+  }
+
+  private async fromLegacy(pane: TmuxPane): Promise<ManagedSession | undefined> {
+    const id = pane.sessionName.startsWith(`${this.sessionPrefix}-`)
+      ? pane.sessionName.slice(this.sessionPrefix.length + 1)
+      : '';
+    const agent = inferLegacyAgent(pane);
+    if (!validSessionId(id) || !agent) return undefined;
+    const agentVersion = await this.resolveAgentVersion(agent).catch(() => 'unknown');
+    return {
+      id,
+      agent,
+      sessionName: pane.sessionName,
+      paneId: pane.paneId,
+      cwd: pane.cwd,
+      agentVersion,
+      updatedAt: Date.now(),
+    };
+  }
+
+  private writeMetadata(pane: TmuxPane, session: ManagedSession): Promise<void> {
+    return this.tmux.writeMetadata(pane.sessionName, {
+      managed: true,
+      sessionId: session.id,
+      agent: session.agent,
+      cwd: session.cwd,
+      agentVersion: session.agentVersion,
+      agentSessionId: session.agentSessionId,
+    });
+  }
+}
+
+export function inferLegacyAgent(pane: Pick<TmuxPane, 'startCommand' | 'currentCommand'>): AgentId | undefined {
+  const command = `${pane.startCommand}\n${pane.currentCommand}`;
+  if (/(?:^|[\s/'"])(?:trae-cli|traex)(?:[\s/'"]|$)/i.test(command)) return 'traex';
+  if (/(?:^|[\s/'"])claude(?:[\s/'"]|$)/i.test(command)) return 'claude';
+  if (/(?:^|[\s/'"])codex(?:[\s/'"]|$)/i.test(command)) return 'codex';
+  return undefined;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}

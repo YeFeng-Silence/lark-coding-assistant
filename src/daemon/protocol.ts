@@ -1,12 +1,13 @@
 import type { ScreenDetection } from '../screen/detector.js';
 import type { ManagedSession, SessionState } from '../core/model.js';
-import type { AgentId, AgentResume, TurnCompleteCandidate } from '../agents/types.js';
+import type { AgentId, AgentResume, AgentSessionStartedCandidate, TurnCompleteCandidate } from '../agents/types.js';
 import type { AppErrorCode, ErrorContext } from '../core/errors.js';
+import type { StartSessionRequest } from '../session/start-request.js';
 
 export type DaemonRequest =
   | { id: string; method: 'ping' }
   | { id: string; method: 'shutdown' }
-  | { id: string; method: 'start'; cwd: string; sessionId: string; agent: AgentId; resume?: AgentResume }
+  | ({ id: string; method: 'start' } & StartSessionRequest)
   | { id: string; method: 'status'; sessionId?: string }
   | { id: string; method: 'tail'; lines?: number }
   | { id: string; method: 'send'; text: string }
@@ -15,6 +16,7 @@ export type DaemonRequest =
   | { id: string; method: 'useSession'; sessionId: string }
   | { id: string; method: 'bindCode' }
   | { id: string; method: 'resetOwner' }
+  | { id: string; method: 'agentSessionStarted'; candidate: AgentSessionStartedCandidate }
   | { id: string; method: 'turnComplete'; candidate: TurnCompleteCandidate };
 
 export type DaemonRequestInput = DaemonRequest extends infer Request
