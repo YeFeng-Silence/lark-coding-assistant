@@ -8,7 +8,7 @@
 
 - codex、traex 与 claude 可混合运行，默认使用 codex；
 - 支持多个命名 session，一个飞书账号可在 `/sessions` 卡片中直接切换或新建；
-- 普通飞书消息默认发送到当前 active session；
+- 普通飞书消息默认发送到当前 active session；消息被 bridge 接收后会在原消息上显示处理中表情，下一条 bridge 通知发送前或等待满 10 分钟时自动移除；
 - 支持 `/tail`、`/status`、`/stop`、远程处理审批与 Question，以及无法识别画面的手动遥控兜底；
 - 本地终端保持 attach 时，飞书仍可操作同一个 TUI；
 - 首次扫码后保存唯一 owner，后续通常无需绑定码；

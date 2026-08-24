@@ -202,6 +202,7 @@ function gateway(overrides: Partial<RemoteGateway> = {}): RemoteGateway {
   return {
     connect: async () => undefined,
     disconnect: async () => undefined,
+    startProcessing: async () => undefined,
     sendText: async () => undefined,
     sendMarkdown: async () => undefined,
     sendChoice: async () => undefined,
