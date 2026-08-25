@@ -153,6 +153,7 @@ function operationLabel(value: ErrorContext[string]): string {
     logs: '读取日志',
     'reset-owner': '重置 owner',
     daemon: '管理 bridge daemon',
+    workspace: '管理 workspace',
   };
   return typeof value === 'string' ? labels[value] ?? '执行命令' : '执行命令';
 }

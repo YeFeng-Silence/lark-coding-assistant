@@ -390,6 +390,70 @@ esc to interrupt`);
     expect(selects[1]?.options?.map(({ value }) => value)).toEqual(['new', 'picker']);
   });
 
+  it('renders project selection, manual fallback, and session fields in one form', () => {
+    const formCard = sessionCreateCard({
+      mode: 'projects', snapshotId: 'snapshot-1', page: 1, pageCount: 3, partial: true,
+      warnings: ['one root failed'],
+      candidates: [{
+        cwd: '/Users/feng/workspace/api', label: 'api · ~/workspace', source: 'configured', git: true,
+      }],
+      draft: {
+        sessionId: 'backend', agent: 'traex', resumeMode: 'picker',
+        cwd: '/Users/feng/workspace/api', projectCwd: '/Users/feng/workspace/api',
+      },
+    }) as InteractiveCard;
+    const serialized = JSON.stringify(formCard);
+    expect(serialized).toContain('api · ~/workspace');
+    expect(serialized).toContain('/Users/feng/workspace/api');
+    expect(serialized).toContain('手动填写其他路径');
+    expect(serialized).toContain('__manual__');
+    expect(serialized).toContain('其他路径（可选）');
+    expect(serialized).not.toContain('select-directory');
+    expect(serialized).not.toContain('上一页');
+    expect(serialized).not.toContain('下一页');
+    expect(serialized).toContain('部分目录未加载');
+    expect(serialized).toContain('session_name');
+    expect(serialized).toContain('session_agent');
+    expect(serialized).toContain('session_resume');
+    expect(serialized).toContain('backend');
+    expect(serialized).toContain('traex');
+    expect(serialized).toContain('picker');
+  });
+
+  it('does not show pagination for a single project page', () => {
+    const serialized = JSON.stringify(sessionCreateCard({
+      mode: 'projects', snapshotId: 'snapshot-1', page: 0, pageCount: 1, partial: false, warnings: [],
+      candidates: [{ cwd: '/work/api', label: 'api · /work', source: 'active', git: true }],
+      draft: { agent: 'codex', resumeMode: 'new' },
+    }));
+    expect(serialized).not.toContain('上一页');
+    expect(serialized).not.toContain('下一页');
+  });
+
+  it('renders an actionable manual-path hint when no projects are available', () => {
+    const serialized = JSON.stringify(sessionCreateCard({
+      mode: 'manual', page: 0, pageCount: 1, candidates: [], hasProjectCandidates: false,
+      partial: false, warnings: ['尚未发现可选项目；请手动填写路径，或在本机运行 lca workspace add ~/workspace。'],
+      draft: { agent: 'claude', resumeMode: 'new' },
+    }));
+    expect(serialized).toContain('lca workspace add ~/workspace');
+    expect(serialized).toContain('~/workspace/project');
+    expect(serialized).not.toContain('返回项目列表');
+  });
+
+  it('uses CardKit 2 default values when redisplaying session inputs', () => {
+    const serialized = JSON.stringify(sessionCreateCard({
+      mode: 'manual', page: 0, pageCount: 1, candidates: [], partial: false, warnings: [],
+      draft: {
+        sessionId: 'docs', agent: 'claude', resumeMode: 'picker',
+        cwd: '/work/docs', manualCwd: '/work/docs',
+      },
+    }));
+    expect(serialized).toContain('"default_value":"docs"');
+    expect(serialized).toContain('"default_value":"/work/docs"');
+    expect(serialized).not.toContain('initial_value');
+  });
+
   it('renders a button-free audit card after opening a new-session form', () => {
     const serialized = JSON.stringify(sessionCreateOpenedCard());
     expect(serialized).toContain('新建表单已打开');

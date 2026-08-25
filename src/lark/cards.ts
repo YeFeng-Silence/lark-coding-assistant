@@ -1,5 +1,7 @@
 import type { ScreenDetection } from '../screen/detector.js';
 import type { ManagedSession } from '../core/model.js';
+import type { SessionCreateView } from '../workspace/session-create.js';
+import { emptySessionCreateDraft } from '../workspace/session-create.js';
 import type { ActionSigner } from './action-signing.js';
 import type { SignedAction } from './action-signing.js';
 import { getAgentAdapter, listAgentAdapters } from '../agents/registry.js';
@@ -410,35 +412,52 @@ export const SESSION_CREATE_SUBMIT_ACTION = 'session_create_submit';
 export const SESSION_CREATE_NAME_FIELD = 'session_name';
 export const SESSION_CREATE_AGENT_FIELD = 'session_agent';
 export const SESSION_CREATE_CWD_FIELD = 'session_cwd';
+export const SESSION_CREATE_PROJECT_FIELD = 'session_project';
 export const SESSION_CREATE_RESUME_FIELD = 'session_resume';
+export const SESSION_CREATE_MANUAL_VALUE = '__manual__';
 
-export function sessionCreateCard(): object {
+export function sessionCreateCard(view: SessionCreateView = {
+  mode: 'manual', page: 0, pageCount: 1, candidates: [], partial: false, warnings: [], draft: emptySessionCreateDraft(),
+}): object {
+  const directoryElements = view.mode === 'projects'
+    ? projectDirectoryFields(view)
+    : [{
+      tag: 'input', name: SESSION_CREATE_CWD_FIELD,
+      default_value: view.draft.manualCwd,
+      placeholder: { tag: 'plain_text', content: '~/workspace/project 或 /absolute/path' },
+      label: { tag: 'plain_text', content: '项目目录' },
+    }];
+  const noticeLines = [
+    ...view.warnings.map((warning) => `⚠️ ${escapeMarkdown(warning)}`),
+    ...(view.partial ? ['⚠️ 部分目录未加载；可选择已显示项目或手动填写路径。'] : []),
+  ];
+  const notices = noticeLines.length > 0
+    ? [{ tag: 'markdown', content: noticeLines.join('\n') }]
+    : [];
   return cardElements('新建 Coding Session', [
     { tag: 'markdown', content: '在本机受管 tmux 中启动一个新会话；创建成功后会自动连接。' },
+    ...notices,
     {
       tag: 'form', name: 'session_create_form', direction: 'vertical', vertical_spacing: '10px', elements: [
         {
           tag: 'input', name: SESSION_CREATE_NAME_FIELD, required: true,
+          default_value: view.draft.sessionId,
           placeholder: { tag: 'plain_text', content: 'Session 名称，例如 helix' },
           label: { tag: 'plain_text', content: 'Session 名称' },
         },
         {
           tag: 'select_static', name: SESSION_CREATE_AGENT_FIELD, required: true,
           placeholder: { tag: 'plain_text', content: '选择 Agent' },
-          initial_option: 'codex',
+          initial_option: view.draft.agent,
           options: listAgentAdapters().map((adapter) => ({
             text: { tag: 'plain_text', content: adapter.displayName }, value: adapter.id,
           })),
         },
-        {
-          tag: 'input', name: SESSION_CREATE_CWD_FIELD, required: true,
-          placeholder: { tag: 'plain_text', content: '/absolute/path/to/project' },
-          label: { tag: 'plain_text', content: '工作目录（必须为绝对路径）' },
-        },
+        ...directoryElements,
         {
           tag: 'select_static', name: SESSION_CREATE_RESUME_FIELD,
           placeholder: { tag: 'plain_text', content: '选择启动方式' },
-          initial_option: 'new',
+          initial_option: view.draft.resumeMode,
           options: [
             { text: { tag: 'plain_text', content: '新会话' }, value: 'new' },
             { text: { tag: 'plain_text', content: '打开原生 Resume Picker' }, value: 'picker' },
@@ -452,6 +471,24 @@ export function sessionCreateCard(): object {
       ],
     },
   ]);
+}
+
+function projectDirectoryFields(view: SessionCreateView): object[] {
+  const options = [...view.candidates.map((candidate) => ({
+    text: { tag: 'plain_text', content: candidate.label }, value: candidate.cwd,
+  })), { text: { tag: 'plain_text', content: '手动填写其他路径…' }, value: SESSION_CREATE_MANUAL_VALUE }];
+  return [{
+    tag: 'select_static', name: SESSION_CREATE_PROJECT_FIELD,
+    placeholder: { tag: 'plain_text', content: '选择项目目录' },
+    initial_option: view.draft.projectCwd,
+    required: true,
+    options,
+  }, {
+    tag: 'input', name: SESSION_CREATE_CWD_FIELD,
+    default_value: view.draft.manualCwd,
+    placeholder: { tag: 'plain_text', content: '选择“手动填写其他路径…”时填写' },
+    label: { tag: 'plain_text', content: '其他路径（可选）' },
+  }];
 }
 
 export function sessionCreateResultCard(

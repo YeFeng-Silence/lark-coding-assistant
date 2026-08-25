@@ -57,7 +57,7 @@ claude --version
 npm install -g lark-coding-assistant@latest && lark-coding-assistant init
 ```
 
-初始化向导会让你选择飞书或 Lark，并显示 PersonalAgent 注册二维码：
+初始化向导会让你选择飞书或 Lark、可选配置常用 workspace 目录，并显示 PersonalAgent 注册二维码：
 
 1. 保持 `init` 命令运行；
 2. 使用飞书/Lark 扫描二维码；
@@ -114,13 +114,33 @@ lca start --name docs --agent claude --cwd ~/workspace/docs
 /sessions
 ```
 
-机器人会发送一张交互卡，按 codex、traex、claude 分组展示仍存活的 session，并显示每个项目的绝对路径。`● 当前` 表示 active session，点击其他 session 的“连接”按钮即可切换，点击“关闭”可停止对应 agent 和 tmux session；也可点击“新建 Session”，填写名称、Agent、绝对工作目录和恢复方式。创建成功后会自动连接；原 session 列表仍可查看、连接和关闭，只会禁用已经使用过的“新建 Session”按钮。也可使用：
+机器人会发送一张交互卡，按 codex、traex、claude 分组展示仍存活的 session，并显示每个项目的绝对路径。`● 当前` 表示 active session，点击其他 session 的“连接”按钮即可切换，点击“关闭”可停止对应 agent 和 tmux session；也可点击“新建 Session”，填写名称、Agent、项目目录和恢复方式。项目目录可直接从已有 Session、最近成功目录和常用 workspace 中选择，必要时可手动填写 `/绝对路径` 或 `~/路径`。创建成功后会自动连接；原 session 列表仍可查看、连接和关闭，只会禁用已经使用过的“新建 Session”按钮。也可使用：
 
 ```text
 /use web
 ```
 
 切换只改变飞书消息和通知的路由，不会停止其他 session。普通消息、`/tail`、`/status`、审批、`/stop` 和停止输出通知都只作用于 active session。
+
+## Workspace 项目目录
+
+可以配置多个常用 workspace root：
+
+```bash
+lca workspace add .
+lca workspace add ~/workspace
+lca workspace add ~/code/company
+lca workspace list
+lca workspace remove ~/code/company
+```
+
+`add` 和 `remove` 支持相对路径，并按执行命令时的当前目录解析。例如 `lca workspace add .` 会把当前目录保存为绝对路径。
+
+配置修改会在下一次打开飞书“新建 Session”表单时生效，不需要重启 daemon。
+
+飞书新建 Session 时，LCA 按以下顺序合并项目目录：仍存活 Session 的目录、最近成功启动的目录、已配置 workspace 下的项目。每个 workspace 只扫描下一级目录，Git 仓库优先于普通目录；同一路径只展示一次。项目目录与其他启动信息在同一张卡片内一次提交；需要使用列表外目录时，选择“手动填写其他路径…”并填写其他路径。最近目录最多保留 30 条。
+
+候选扫描有 2 秒和 500 个目录的上限。达到上限或部分目录不可访问时，卡片仍会展示已经找到的项目，并保留“手动填写其他路径”兜底。手动输入支持 `~/...`，启动前会展开并校验；启动结果、状态和 Session 列表始终展示完整绝对路径。
 
 ## 恢复 agent 历史会话
 
@@ -166,7 +186,7 @@ lca attach web
 
 - `/sessions`：按 agent 分组展示所有仍存活的 session 及其绝对路径，可直接连接、关闭或打开新建表单。
 - `/start`：直接打开新建 Session 表单。
-- `/start <name> --agent <codex|traex|claude> --cwd <绝对路径> [--resume]`：用文本命令启动并自动连接新 session；包含空格的路径请加引号。使用 `--resume` 会打开原生 Resume Picker。飞书端不支持“恢复上次”或直接输入历史 Session ID。
+- `/start <name> --agent <codex|traex|claude> --cwd <绝对路径或 ~/路径> [--resume]`：用文本命令启动并自动连接新 session；包含空格的路径请加引号。使用 `--resume` 会打开原生 Resume Picker。飞书端不支持“恢复上次”或直接输入历史 Session ID。
 - `/use <name>`：用文本命令切换 session。
 - `/tail [20-300]`：返回当前 session 最近的终端输出，默认 80 行。
 - `/manual`：打开当前 active session 的手动终端遥控卡。

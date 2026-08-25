@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, realpath, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -101,17 +101,38 @@ describe('CLI process error boundary', () => {
     expect(result.stderr).toContain('尚未完成初始化');
     expect(result.stdout).not.toContain('Usage:');
   });
+
+  it('adds, lists, and removes workspace roots through the lca command surface', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'lca-cli-workspace-'));
+    const project = await mkdtemp(join(tmpdir(), 'lca-cli-project-'));
+    const resolvedProject = await realpath(project);
+    await writeFile(join(home, 'config.json'), JSON.stringify({
+      tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 650,
+      agentBinaries: { codex: 'codex', traex: 'trae-cli', claude: 'claude' }, workspaceRoots: [],
+    }));
+    await writeFile(join(home, 'secrets.json'), JSON.stringify({ appSecret: 'secret', callbackSecret: 'callback' }));
+
+    const added = await runCli(['workspace', 'add', '.'], home, {}, project);
+    expect(added).toMatchObject({ code: 0, stderr: '' });
+    expect(added.stdout).toContain(`Workspace 已添加：${resolvedProject}`);
+    expect((await runCli(['workspace', 'list'], home)).stdout.trim()).toBe(resolvedProject);
+    expect((await runCli(['workspace', 'remove', '.'], home, {}, project)).stdout).toContain(`Workspace 已移除：${resolvedProject}`);
+    expect((await runCli(['workspace', 'list'], home)).stdout).toContain('尚未配置 workspace');
+  });
 });
 
 function runCli(
   args: string[],
   home: string,
   extraEnv: NodeJS.ProcessEnv = {},
+  cwd = process.cwd(),
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  const tsx = resolve('node_modules/.bin/tsx');
+  const projectRoot = process.cwd();
+  const tsx = resolve(projectRoot, 'node_modules/.bin/tsx');
+  const cli = resolve(projectRoot, 'src/cli.ts');
   return new Promise((resolveResult, reject) => {
-    const child = execFile(tsx, ['src/cli.ts', ...args], {
-      cwd: process.cwd(),
+    const child = execFile(tsx, [cli, ...args], {
+      cwd,
       env: { ...process.env, ...extraEnv, LARK_CODING_ASSISTANT_HOME: home },
     }, (error, stdout, stderr) => {
       if (error && !('code' in error)) {

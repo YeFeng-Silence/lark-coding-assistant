@@ -11,6 +11,7 @@ import type { AgentId } from '../agents/types.js';
 import type { ResumePickerView } from '../screen/resume-picker.js';
 import type { StartSessionRequest } from '../session/start-request.js';
 import type { SessionStartupFailure } from '../session/startup-failure.js';
+import type { SessionCreateView } from '../workspace/session-create.js';
 import { ActionSigner, type SignedAction } from './action-signing.js';
 import {
   CHOICE_FORM_SUBMIT_ACTION,
@@ -49,7 +50,7 @@ export type LarkActionResult =
   | { type: 'awaiting-input'; content: string; agent: AgentId; label: string }
   | { type: 'refresh'; content: string; screen: ScreenDetection; paneId: string; agent: AgentId }
   | { type: 'manual'; content: string; view: ManualControlView }
-  | { type: 'session-create-form'; content: string; sessions?: ManagedSession[]; activeSessionId?: string }
+  | { type: 'session-create-form'; content: string; view: SessionCreateView; sessions?: ManagedSession[]; activeSessionId?: string }
   | { type: 'session-created'; content: string; session: ManagedSession }
   | { type: 'session-start-failed'; content: string; failure: SessionStartupFailure }
   | { type: 'resume-picker'; content: string; session: ManagedSession; picker: ResumePickerView }
@@ -73,7 +74,7 @@ export interface RemoteGateway {
   sendSessionPicker(chatId: string, sessions: ManagedSession[], activeSessionId?: string): Promise<unknown>;
   sendResumePicker(chatId: string, session: ManagedSession, picker: ResumePickerView): Promise<unknown>;
   sendStartupConflict(chatId: string, request: StartSessionRequest, owner: ManagedSession): Promise<unknown>;
-  sendSessionCreate(chatId: string): Promise<unknown>;
+  sendSessionCreate(chatId: string, view: SessionCreateView): Promise<unknown>;
   sendSessionStartupFailure(chatId: string, failure: SessionStartupFailure): Promise<unknown>;
   sendStopConfirmation(chatId: string, paneId: string, fingerprint: string, agent: AgentId): Promise<unknown>;
 }
@@ -137,10 +138,10 @@ export class LarkGateway implements RemoteGateway {
       const result = await this.handler.onAction(event, action);
       if (result.type === 'error') return { toast: result };
       if (result.type === 'session-create-form') {
-        this.rememberSessionCreateFormAction(event.messageId, event.chatId);
+        this.rememberSessionCreateFormActions(event.messageId, event.chatId, result.view);
         return {
           toast: { type: 'success', content: result.content },
-          card: { type: 'raw', data: sessionCreateCard() },
+          card: { type: 'raw', data: sessionCreateCard(result.view) },
         };
       }
       if (result.type === 'manual') {
@@ -260,8 +261,13 @@ export class LarkGateway implements RemoteGateway {
         return;
       }
       if (result.type === 'session-create-form') {
-        const sent = await this.sendMessage(event.chatId, { card: sessionCreateCard() });
-        this.rememberSessionCreateFormAction(sent.messageId, event.chatId);
+        if (action.kind === 'session-create' && action.action !== 'open') {
+          await this.updateCardAfterAction(event.messageId, sessionCreateCard(result.view));
+          this.rememberSessionCreateFormActions(event.messageId, event.chatId, result.view);
+          return;
+        }
+        const sent = await this.sendMessage(event.chatId, { card: sessionCreateCard(result.view) });
+        this.rememberSessionCreateFormActions(sent.messageId, event.chatId, result.view);
         const sourceCard = action.kind === 'session-create' && result.sessions
           ? sessionPickerCard(event.chatId, result.sessions, result.activeSessionId, this.signer, undefined, false)
           : sessionCreateOpenedCard();
@@ -416,13 +422,13 @@ export class LarkGateway implements RemoteGateway {
     ]));
   }
 
-  private rememberSessionCreateFormAction(messageId: string, chatId: string): void {
-    this.formActions.set(messageId, new Map([[
-      SESSION_CREATE_SUBMIT_ACTION,
-      this.signer.sign({
-        kind: 'session-create', agent: 'codex', action: 'submit', paneId: '', fingerprint: 'create', chatId,
-      }, 10 * 60_000),
-    ]]));
+  private rememberSessionCreateFormActions(messageId: string, chatId: string, view: SessionCreateView): void {
+    const actions = new Map<string, SignedAction>();
+    actions.set(SESSION_CREATE_SUBMIT_ACTION, this.signer.sign({
+      kind: 'session-create', agent: view.draft.agent, action: 'submit', paneId: '', fingerprint: view.mode, chatId,
+      snapshotId: view.snapshotId, page: view.page,
+    }, 10 * 60_000));
+    this.formActions.set(messageId, actions);
   }
 
   private rememberFormActions(
@@ -470,9 +476,9 @@ export class LarkGateway implements RemoteGateway {
     return this.sendMessage(chatId, { card: startupConflictCard(chatId, requestSession(request), owner, this.signer) });
   }
 
-  async sendSessionCreate(chatId: string): Promise<unknown> {
-    const result = await this.sendMessage(chatId, { card: sessionCreateCard() });
-    this.rememberSessionCreateFormAction(result.messageId, chatId);
+  async sendSessionCreate(chatId: string, view: SessionCreateView): Promise<unknown> {
+    const result = await this.sendMessage(chatId, { card: sessionCreateCard(view) });
+    this.rememberSessionCreateFormActions(result.messageId, chatId, view);
     return result;
   }
 

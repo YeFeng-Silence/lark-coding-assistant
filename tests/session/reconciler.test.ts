@@ -28,6 +28,27 @@ describe('SessionReconciler', () => {
     expect(result.removedActive?.id).toBe('helix');
   });
 
+  it('removes a confirmed dead session immediately and cleans its tmux container', async () => {
+    const tmux = new FakeTmux();
+    const deadPane = { ...pane('lark-coding-assistant-test', '%9', 'trae-cli'), dead: true, exitStatus: 0 };
+    tmux.inspectResult = { status: 'dead', pane: deadPane };
+    tmux.sessionResult = { status: 'dead', pane: deadPane };
+    const reconciler = new SessionReconciler(tmux);
+    const result = await reconciler.reconcile(stateWith(session('test', 'traex')));
+    expect(result.state.sessions?.test).toBeUndefined();
+    expect(result.removedActive?.id).toBe('test');
+    expect(tmux.killed).toEqual(['lark-coding-assistant-test']);
+  });
+
+  it('cleans an orphaned dead LCA tmux session during discovery', async () => {
+    const tmux = new FakeTmux();
+    tmux.panes = [{ ...pane('lark-coding-assistant-test', '%9', 'trae-cli'), dead: true, exitStatus: 0 }];
+    const reconciler = new SessionReconciler(tmux);
+    const result = await reconciler.reconcile({ schemaVersion: 2, sessions: {}, updatedAt: 1 }, true);
+    expect(result.state.sessions?.test).toBeUndefined();
+    expect(tmux.killed).toEqual(['lark-coding-assistant-test']);
+  });
+
   it('recovers a marked orphan session and chooses it as active', async () => {
     const tmux = new FakeTmux();
     tmux.panes = [pane('lark-coding-assistant-docs', '%3', 'claude')];
@@ -64,12 +85,14 @@ class FakeTmux implements SessionTmux {
   sessionResult: TmuxInspectResult = this.inspectResult;
   panes: TmuxPane[] = [];
   metadata = new Map<string, TmuxSessionMetadata>();
+  killed: string[] = [];
 
   async inspectStatus(): Promise<TmuxInspectResult> { return this.inspectResult; }
   async inspectSession(): Promise<TmuxInspectResult> { return this.sessionResult; }
   async listSessions(): Promise<TmuxPane[]> { return this.panes; }
   async readMetadata(name: string): Promise<TmuxSessionMetadata | undefined> { return this.metadata.get(name); }
   async writeMetadata(name: string, metadata: TmuxSessionMetadata): Promise<void> { this.metadata.set(name, metadata); }
+  async killSession(name: string): Promise<void> { this.killed.push(name); }
 }
 
 function pane(sessionName: string, paneId: string, startCommand: string, currentCommand = startCommand): TmuxPane {

@@ -23,6 +23,8 @@ import type { DaemonRequestInput, DaemonResult } from './daemon/protocol.js';
 import type { RuntimeStatus } from './daemon/protocol.js';
 import { validateStartSessionRequest } from './session/start-request.js';
 import { fallbackRuntimeSessions, formatCliStatus } from './cli-status.js';
+import { addWorkspaceRoot, listWorkspaceRoots, removeWorkspaceRoot } from './workspace/config.js';
+import { normalizeWorkspaceRoots } from './workspace/path.js';
 
 const program = new Command();
 const paths = resolveAppPaths();
@@ -53,6 +55,10 @@ daemonCommand.command('start').description('Start the bridge daemon').action(run
 daemonCommand.command('stop').description('Stop the bridge daemon without stopping coding-agent sessions').action(runDaemonStop);
 daemonCommand.command('restart').description('Restart the bridge daemon without stopping coding-agent sessions').action(runDaemonRestart);
 daemonCommand.command('status').description('Show bridge daemon status and version').action(runDaemonStatus);
+const workspaceCommand = program.command('workspace').description('Manage project workspace roots');
+workspaceCommand.command('add').argument('<path>', 'Workspace root path').description('Add a workspace root').action(runWorkspaceAdd);
+workspaceCommand.command('list').description('List workspace roots').action(runWorkspaceList);
+workspaceCommand.command('remove').argument('<path>', 'Workspace root path').description('Remove a workspace root').action(runWorkspaceRemove);
 
 try {
   await program.parseAsync();
@@ -64,6 +70,7 @@ try {
 
 async function runInit(): Promise<void> {
   await store.ensure();
+  const previousConfig = await store.loadConfig();
   const tenantAnswer = await p.select({
     message: '选择平台',
     options: [
@@ -73,6 +80,16 @@ async function runInit(): Promise<void> {
   });
   if (p.isCancel(tenantAnswer)) return p.cancel('已取消');
   const tenant = tenantAnswer as Tenant;
+
+  const workspaceAnswer = await p.text({
+    message: '常用 workspace 目录（可选，多个目录用逗号分隔）',
+    placeholder: '~/workspace, ~/code',
+    initialValue: previousConfig?.workspaceRoots.join(', ') ?? '',
+  });
+  if (p.isCancel(workspaceAnswer)) return p.cancel('已取消');
+  const workspaceRoots = normalizeWorkspaceRoots(
+    String(workspaceAnswer).split(',').map((value) => value.trim()).filter(Boolean),
+  );
 
   p.log.info('请使用飞书/Lark 扫描下面的二维码，创建或选择 PersonalAgent。');
   const registration = await registerApp({
@@ -102,6 +119,7 @@ async function runInit(): Promise<void> {
     tmuxBinary: 'tmux',
     agentBinaries: { codex: 'codex', traex: 'trae-cli', claude: 'claude' },
     pollIntervalMs: 650,
+    workspaceRoots,
   };
   const previousState = await store.loadState();
   const registeredOwnerOpenId = registration.user_info?.open_id;
@@ -134,7 +152,8 @@ interface StartOptions extends ResumeOptions {
 }
 
 async function runStart(options: StartOptions): Promise<void> {
-  const cwd = resolve(options.cwd ?? process.cwd());
+  const requestedCwd = options.cwd ?? process.cwd();
+  const cwd = requestedCwd.startsWith('~') ? requestedCwd : resolve(requestedCwd);
   const resume = resolveResumeOption(options);
   const request = await validateStartSessionRequest({
     sessionId: options.name, agent: options.agent, cwd, resume,
@@ -157,6 +176,28 @@ async function runStart(options: StartOptions): Promise<void> {
     console.log(`飞书当前仍连接其它 session；发送 /use ${options.name} 后切换到本 session。\n`);
   }
   await attachLocal(options.name);
+}
+
+async function runWorkspaceAdd(path: string): Promise<void> {
+  await ensureInitialized();
+  const config = (await store.loadConfig())!;
+  const result = await addWorkspaceRoot(config, path);
+  if (result.added) await store.saveConfig(result.config);
+  console.log(result.added ? `Workspace 已添加：${result.path}` : `Workspace 已存在：${result.path}`);
+}
+
+async function runWorkspaceList(): Promise<void> {
+  await ensureInitialized();
+  const roots = listWorkspaceRoots((await store.loadConfig())!);
+  console.log(roots.length > 0 ? roots.join('\n') : '尚未配置 workspace。可运行：lca workspace add ~/workspace');
+}
+
+async function runWorkspaceRemove(path: string): Promise<void> {
+  await ensureInitialized();
+  const config = (await store.loadConfig())!;
+  const result = removeWorkspaceRoot(config, path);
+  if (result.removed) await store.saveConfig(result.config);
+  console.log(result.removed ? `Workspace 已移除：${result.path}` : `Workspace 未配置：${result.path}`);
 }
 
 interface StartSessionValue {

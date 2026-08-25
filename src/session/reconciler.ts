@@ -9,6 +9,7 @@ export interface SessionTmux {
   listSessions(prefix: string): Promise<TmuxPane[]>;
   readMetadata(sessionName: string): Promise<TmuxSessionMetadata | undefined>;
   writeMetadata(sessionName: string, metadata: TmuxSessionMetadata): Promise<void>;
+  killSession(sessionName: string): Promise<void>;
 }
 
 export interface ReconcileResult {
@@ -44,6 +45,15 @@ export class SessionReconciler {
           sessions[id] = { ...session, paneId: result.pane.paneId, sessionName: result.pane.sessionName, updatedAt: Date.now() };
           changed = true;
         }
+        continue;
+      }
+      if (result.status === 'dead') {
+        await this.tmux.killSession(result.pane.sessionName).catch((error) => this.log(
+          `failed to clean dead tmux session ${result.pane.sessionName}: ${errorMessage(error)}`,
+        ));
+        delete sessions[id];
+        this.misses.delete(id);
+        changed = true;
         continue;
       }
       const misses = (this.misses.get(id) ?? 0) + 1;
@@ -89,9 +99,18 @@ export class SessionReconciler {
     }
     let changed = false;
     const seen = new Set<string>();
+    const liveSessionNames = new Set(panes.filter((pane) => !pane.dead).map((pane) => pane.sessionName));
     for (const pane of panes) {
-      if (seen.has(pane.sessionName) || pane.dead) continue;
+      if (seen.has(pane.sessionName)) continue;
       seen.add(pane.sessionName);
+      if (pane.dead) {
+        if (!liveSessionNames.has(pane.sessionName)) {
+          await this.tmux.killSession(pane.sessionName).catch((error) => this.log(
+            `failed to clean orphaned dead tmux session ${pane.sessionName}: ${errorMessage(error)}`,
+          ));
+        }
+        continue;
+      }
       const registered = Object.values(sessions).find((session) => session.sessionName === pane.sessionName);
       if (registered) {
         if (registered.paneId !== pane.paneId) {

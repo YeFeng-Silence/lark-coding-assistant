@@ -14,6 +14,13 @@ describe('validateStartSessionRequest', () => {
     });
   });
 
+  it('expands a home-relative directory before returning the request', async () => {
+    const home = process.env.HOME;
+    if (!home) return;
+    await expect(validateStartSessionRequest({ sessionId: 'home', agent: 'codex', cwd: '~' }))
+      .resolves.toMatchObject({ cwd: home });
+  });
+
   it('rejects invalid names and relative, missing, or non-directory paths', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'lca-start-invalid-'));
     const file = join(cwd, 'file.txt');

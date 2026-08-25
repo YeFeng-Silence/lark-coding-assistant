@@ -35,7 +35,7 @@ export class TmuxController {
       throw new AppError(
         'SESSION_EXISTS',
         `tmux session already exists: ${options.sessionName}`,
-        { sessionId: displaySessionId(options.sessionName) },
+        { sessionId: displaySessionId(options.sessionName), source: 'tmux' },
       );
     }
     const environment = Object.entries(options.env ?? {}).map(([key, value]) => {

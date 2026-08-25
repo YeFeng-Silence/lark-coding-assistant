@@ -3,6 +3,12 @@ import type { CardActionEvent, NormalizedMessage } from '@larksuite/channel';
 import type { LarkActionResult, LarkGatewayHandler } from '../../src/lark/gateway.js';
 import type { SignedAction } from '../../src/lark/action-signing.js';
 import { detectClaudeScreen } from '../../src/screen/detector.js';
+import type { SessionCreateView } from '../../src/workspace/session-create.js';
+
+const createView = (cwd = '/work'): SessionCreateView => ({
+  mode: 'manual', page: 0, pageCount: 1, candidates: [], partial: false, warnings: [],
+  draft: { agent: 'codex', resumeMode: 'new', cwd, manualCwd: cwd },
+});
 
 const mocks = vi.hoisted(() => {
   const listeners = new Map<string, (event: unknown) => unknown>();
@@ -48,7 +54,7 @@ describe('LarkGateway form callbacks', () => {
     const { LarkGateway } = await import('../../src/lark/gateway.js');
     const gateway = new LarkGateway(
       {
-        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100,
+        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100, workspaceRoots: [],
         agentBinaries: { codex: 'codex', 'traex': 'traex', 'claude': 'claude' },
       },
       { appSecret: 'secret', callbackSecret: 'callback' },
@@ -68,7 +74,7 @@ describe('LarkGateway form callbacks', () => {
     const { LarkGateway } = await import('../../src/lark/gateway.js');
     const gateway = new LarkGateway(
       {
-        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100,
+        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100, workspaceRoots: [],
         agentBinaries: { codex: 'codex', 'traex': 'traex', 'claude': 'claude' },
       },
       { appSecret: 'secret', callbackSecret: 'callback' },
@@ -86,7 +92,7 @@ describe('LarkGateway form callbacks', () => {
     const { LarkGateway } = await import('../../src/lark/gateway.js');
     const gateway = new LarkGateway(
       {
-        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100,
+        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100, workspaceRoots: [],
         agentBinaries: { codex: 'codex', 'traex': 'traex', 'claude': 'claude' },
       },
       { appSecret: 'secret', callbackSecret: 'callback' },
@@ -107,8 +113,8 @@ describe('LarkGateway form callbacks', () => {
       const { LarkGateway } = await import('../../src/lark/gateway.js');
       const gateway = new LarkGateway(
         {
-          tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100,
-          agentBinaries: { codex: 'codex', 'traex': 'traex', 'claude': 'claude' },
+          tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100, workspaceRoots: [],
+        agentBinaries: { codex: 'codex', 'traex': 'traex', 'claude': 'claude' },
         },
         { appSecret: 'secret', callbackSecret: 'callback' },
         { onMessage: async () => undefined, onAction: async () => ({ type: 'success', content: 'ok' }) },
@@ -128,7 +134,7 @@ describe('LarkGateway form callbacks', () => {
     const { LarkGateway } = await import('../../src/lark/gateway.js');
     const gateway = new LarkGateway(
       {
-        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100,
+        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100, workspaceRoots: [],
         agentBinaries: { codex: 'codex', 'traex': 'traex', 'claude': 'claude' },
       },
       { appSecret: 'secret', callbackSecret: 'callback' },
@@ -143,7 +149,7 @@ describe('LarkGateway form callbacks', () => {
     const { LarkGateway } = await import('../../src/lark/gateway.js');
     const gateway = new LarkGateway(
       {
-        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100,
+        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100, workspaceRoots: [],
         agentBinaries: { codex: 'codex', 'traex': 'traex', 'claude': 'claude' },
       },
       { appSecret: 'secret', callbackSecret: 'callback' },
@@ -161,7 +167,7 @@ describe('LarkGateway form callbacks', () => {
     const { LarkGateway } = await import('../../src/lark/gateway.js');
     const gateway = new LarkGateway(
       {
-        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100,
+        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100, workspaceRoots: [],
         agentBinaries: { codex: 'codex', 'traex': 'traex', 'claude': 'claude' },
       },
       { appSecret: 'secret', callbackSecret: 'callback' },
@@ -183,7 +189,7 @@ describe('LarkGateway form callbacks', () => {
     };
     new LarkGateway(
       {
-        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100,
+        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100, workspaceRoots: [],
         agentBinaries: { codex: 'codex', 'traex': 'traex', 'claude': 'claude' },
       },
       { appSecret: 'secret', callbackSecret: 'callback' }, handler,
@@ -209,7 +215,7 @@ describe('LarkGateway form callbacks', () => {
     };
     new LarkGateway(
       {
-        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100,
+        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100, workspaceRoots: [],
         agentBinaries: { codex: 'codex', 'traex': 'traex', 'claude': 'claude' },
       },
       { appSecret: 'secret', callbackSecret: 'callback' }, handler,
@@ -235,12 +241,12 @@ describe('LarkGateway form callbacks', () => {
     const handler: LarkGatewayHandler = {
       onMessage: async () => undefined,
       onAction: vi.fn(async (_event, action) => action.action === 'open'
-        ? { type: 'session-create-form' as const, content: '请填写启动信息。', sessions: [session], activeSessionId: undefined }
+        ? { type: 'session-create-form' as const, content: '请填写启动信息。', view: createView(), sessions: [session], activeSessionId: undefined }
         : { type: 'session-created' as const, content: '已启动并连接 traex session「remote」。', session }),
     };
     const gateway = new LarkGateway(
       {
-        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100,
+        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100, workspaceRoots: [],
         agentBinaries: { codex: 'codex', 'traex': 'traex', 'claude': 'claude' },
       },
       { appSecret: 'secret', callbackSecret: 'callback' }, handler,
@@ -302,7 +308,7 @@ describe('LarkGateway form callbacks', () => {
     };
     const gateway = new LarkGateway(
       {
-        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100,
+        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100, workspaceRoots: [],
         agentBinaries: { codex: 'codex', 'traex': 'traex', 'claude': 'claude' },
       },
       { appSecret: 'secret', callbackSecret: 'callback' }, handler,
@@ -340,6 +346,7 @@ describe('LarkGateway form callbacks', () => {
         || (action.kind === 'session-create' && action.action === 'open')
         ? {
             type: 'session-create-form' as const, content: '请填写启动信息。',
+            view: createView(),
             ...(action.kind === 'session-create' ? { sessions: [], activeSessionId: undefined } : {}),
           }
         : {
@@ -353,7 +360,7 @@ describe('LarkGateway form callbacks', () => {
     };
     const gateway = new LarkGateway(
       {
-        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100,
+        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100, workspaceRoots: [],
         agentBinaries: { codex: 'codex', 'traex': 'traex', 'claude': 'claude' },
       },
       { appSecret: 'secret', callbackSecret: 'callback' }, handler,
@@ -407,12 +414,12 @@ describe('LarkGateway form callbacks', () => {
     };
     const gateway = new LarkGateway(
       {
-        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100,
+        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100, workspaceRoots: [],
         agentBinaries: { codex: 'codex', 'traex': 'traex', 'claude': 'claude' },
       },
       { appSecret: 'secret', callbackSecret: 'callback' }, handler,
     );
-    await gateway.sendSessionCreate('oc_1');
+    await gateway.sendSessionCreate('oc_1', createView('relative'));
     const listener = mocks.listeners.get('cardAction');
     await listener?.({
       messageId: 'om_form', chatId: 'oc_1', operator: { openId: 'ou_1' },
@@ -451,12 +458,12 @@ describe('LarkGateway form callbacks', () => {
     };
     const gateway = new LarkGateway(
       {
-        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100,
+        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100, workspaceRoots: [],
         agentBinaries: { codex: 'codex', 'traex': 'traex', 'claude': 'claude' },
       },
       { appSecret: 'secret', callbackSecret: 'callback' }, handler,
     );
-    await gateway.sendSessionCreate('oc_1');
+    await gateway.sendSessionCreate('oc_1', createView());
     const listener = mocks.listeners.get('cardAction');
     await listener?.({
       messageId: 'om_form', chatId: 'oc_1', operator: { openId: 'ou_1' },
@@ -482,7 +489,7 @@ describe('LarkGateway form callbacks', () => {
     };
     const gateway = new LarkGateway(
       {
-        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100,
+        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100, workspaceRoots: [],
         agentBinaries: { codex: 'codex', 'traex': 'traex', 'claude': 'claude' },
       },
       { appSecret: 'secret', callbackSecret: 'callback' },
@@ -536,7 +543,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel`);
     };
     const gateway = new LarkGateway(
       {
-        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100,
+        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100, workspaceRoots: [],
         agentBinaries: { codex: 'codex', 'traex': 'traex', 'claude': 'claude' },
       },
       { appSecret: 'secret', callbackSecret: 'callback' },
@@ -589,7 +596,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel`);
     };
     const gateway = new LarkGateway(
       {
-        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100,
+        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100, workspaceRoots: [],
         agentBinaries: { codex: 'codex', 'traex': 'traex', 'claude': 'claude' },
       },
       { appSecret: 'secret', callbackSecret: 'callback' },
@@ -633,7 +640,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel`);
     };
     const gateway = new LarkGateway(
       {
-        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100,
+        tenant: 'feishu', appId: 'app', tmuxBinary: 'tmux', pollIntervalMs: 100, workspaceRoots: [],
         agentBinaries: { codex: 'codex', 'traex': 'traex', 'claude': 'claude' },
       },
       { appSecret: 'secret', callbackSecret: 'callback' },
