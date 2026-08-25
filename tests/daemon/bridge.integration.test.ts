@@ -434,9 +434,11 @@ class FakeGateway implements RemoteGateway {
   }
 }
 
+let messageSequence = 0;
+
 function message(content: string): NormalizedMessage {
   return {
-    messageId: `om_${Date.now()}`,
+    messageId: `om_${Date.now()}_${++messageSequence}`,
     chatId: 'oc_owner',
     chatType: 'p2p',
     senderId: 'ou_owner',
