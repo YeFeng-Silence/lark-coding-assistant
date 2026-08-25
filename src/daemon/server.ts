@@ -26,7 +26,9 @@ import {
   MANUAL_TEXT_FIELD,
   SESSION_CREATE_AGENT_FIELD,
   SESSION_CREATE_CWD_FIELD,
+  SESSION_CREATE_MANUAL_VALUE,
   SESSION_CREATE_NAME_FIELD,
+  SESSION_CREATE_PROJECT_FIELD,
   SESSION_CREATE_RESUME_FIELD,
   choiceFormFieldName,
   inlineInputName,
@@ -37,6 +39,14 @@ import { parseStartCommand } from '../lark/start-command.js';
 import { normalizeAgentId } from '../agents/types.js';
 import { parseResumePicker, type ResumePickerView } from '../screen/resume-picker.js';
 import { startupTerminalExcerpt } from '../terminal/startup-error.js';
+import { discoverWorkspaces } from '../workspace/discovery.js';
+import { rememberRecentWorkspace } from '../workspace/recent.js';
+import { WorkspaceSnapshotStore, type WorkspaceSnapshot } from '../workspace/snapshot.js';
+import {
+  emptySessionCreateDraft,
+  type SessionCreateDraft,
+  type SessionCreateView,
+} from '../workspace/session-create.js';
 
 export class AssistantDaemon {
   private config!: AppConfig;
@@ -62,6 +72,7 @@ export class AssistantDaemon {
   private readonly pendingAgentSessionClaims = new Map<string, AgentSessionStartedCandidate>();
   private readonly pendingResumePickers = new Map<string, StartSessionRequest>();
   private readonly pendingStartupConflicts = new Map<string, { request: StartSessionRequest; ownerSessionId: string }>();
+  private readonly workspaceSnapshots = new WorkspaceSnapshotStore();
   private pendingInteractionInput?: {
     sessionId: string;
     interactionId: string;
@@ -220,7 +231,8 @@ export class AssistantDaemon {
     resume?: AgentResume,
   ): Promise<DaemonResult> {
     try {
-      await validateStartSessionRequest({ sessionId, cwd, agent: agentId, resume });
+      const validated = await validateStartSessionRequest({ sessionId, cwd, agent: agentId, resume });
+      cwd = validated.cwd;
     } catch (error) {
       return fail(error);
     }
@@ -352,6 +364,7 @@ export class AssistantDaemon {
       await this.tmux.preserveOnExit(session.sessionName, false).catch((error) => this.log(
         `failed to disable startup preservation for ${sessionId}: ${errorMessage(error)}`,
       ));
+      await this.rememberSessionWorkspace(session.cwd);
     }
     await this.log(
       `session created: session=${session.id} agent=${session.agent} pane=${session.paneId} active=${this.state.activeSessionId === session.id}`,
@@ -453,7 +466,7 @@ export class AssistantDaemon {
 
     if (text === '/start') {
       try {
-        await this.gateway?.sendSessionCreate(message.chatId);
+        await this.gateway?.sendSessionCreate(message.chatId, await this.createSessionWorkspaceView(message.chatId));
       } catch (error) {
         await this.log(`session create card failed: ${errorMessage(error)}`);
         await this.gateway?.sendText(message.chatId, '新建 Session 表单发送失败。请使用 /start <name> --agent <agent> --cwd <绝对路径>。');
@@ -749,7 +762,10 @@ export class AssistantDaemon {
     }
     if (action.kind === 'session-stop') return this.handleSessionStopAction(action);
     if (action.kind === 'session-start-error') {
-      if (action.action === 'create') return { type: 'session-create-form', content: '请填写启动信息。' };
+      if (action.action === 'create') return {
+        type: 'session-create-form', content: '请填写启动信息。',
+        view: await this.createSessionWorkspaceView(event.chatId),
+      };
       if (action.action === 'sessions') {
         await this.reconcileSessions(true);
         return this.sessionPickerActionResult('已发送最新 Sessions。');
@@ -763,15 +779,53 @@ export class AssistantDaemon {
         return {
           type: 'session-create-form',
           content: '请填写启动信息。',
+          view: await this.createSessionWorkspaceView(event.chatId),
           sessions: Object.values(this.state.sessions ?? {}),
           activeSessionId: this.state.activeSessionId,
         };
       }
-      if (action.action !== 'submit' || !event.action.formValue) {
+      const snapshot = action.snapshotId
+        ? this.workspaceSnapshots.get(action.snapshotId, event.chatId, event.operator.openId)
+        : undefined;
+      if (!snapshot && action.snapshotId) {
+        return {
+          type: 'session-create-form', content: '项目目录列表已过期，已重新加载。',
+          view: await this.createSessionWorkspaceView(event.chatId),
+        };
+      }
+      if (action.action !== 'submit') return { type: 'error', content: '无法识别新建 Session 操作。' };
+      if (!event.action.formValue) {
         return { type: 'error', content: '无法识别新建 Session 表单，请重新发送 /sessions。' };
       }
-      const request = startRequestFromForm(event.action.formValue);
-      if (!request.ok) return { type: 'error', content: request.error };
+      const submittedResumeMode = formString(event.action.formValue[SESSION_CREATE_RESUME_FIELD]) || 'new';
+      if (submittedResumeMode === 'last') {
+        return { type: 'error', content: '飞书已不再支持“恢复上次会话”，请重新打开表单并使用 Resume Picker。' };
+      }
+      if (submittedResumeMode !== 'new' && submittedResumeMode !== 'picker') {
+        return { type: 'error', content: '无法识别启动方式，请重新打开新建 Session 表单。' };
+      }
+      const submittedAgent = formString(event.action.formValue[SESSION_CREATE_AGENT_FIELD]);
+      if (!normalizeAgentId(submittedAgent)) {
+        return { type: 'error', content: '请选择有效的 Agent：codex、traex 或 claude。' };
+      }
+      const draft = sessionCreateDraftFromForm(event.action.formValue);
+      const submittedProject = formString(event.action.formValue[SESSION_CREATE_PROJECT_FIELD]);
+      const manualForm = action.fingerprint === 'manual';
+      const selectedProject = submittedProject !== SESSION_CREATE_MANUAL_VALUE ? submittedProject : '';
+      if (selectedProject && !manualForm && (!snapshot
+        || !snapshot.candidates.some((candidate) => candidate.cwd === selectedProject))) {
+        return {
+          type: 'session-create-form', content: '项目目录列表已变化，已重新加载。',
+          view: await this.createSessionWorkspaceView(event.chatId),
+        };
+      }
+      const request = startRequestFromDraft(draft);
+      if (!request.ok) {
+        return {
+          type: 'session-create-form', content: request.error,
+          view: this.sessionCreateRetryView(snapshot, draft),
+        };
+      }
       const result = await this.startRemoteSession(request.value);
       if (!result.ok) return larkStartupError(result.error, request.value);
       if (result.state === 'picker') {
@@ -985,6 +1039,7 @@ export class AssistantDaemon {
     await this.tmux.preserveOnExit(session.sessionName, false).catch(() => undefined);
     const selected = await this.useSession(sessionId);
     if (!selected.ok) return { type: 'error', content: remoteError(selected) };
+    await this.rememberSessionWorkspace(session.cwd);
     return { type: 'session-created', content: remoteStartSuccess(session), session };
   }
 
@@ -1896,6 +1951,78 @@ export class AssistantDaemon {
     return { ok: true, state: 'ready', session };
   }
 
+  private async createSessionWorkspaceView(
+    chatId: string,
+    draft: SessionCreateDraft = emptySessionCreateDraft(),
+  ): Promise<SessionCreateView> {
+    await this.reconcileSessions(true);
+    const latestConfig = await this.store.loadConfig();
+    const discovered = await discoverWorkspaces({
+      workspaceRoots: latestConfig?.workspaceRoots ?? this.config.workspaceRoots,
+      activeSessions: Object.values(this.state.sessions ?? {}),
+      recentWorkspaces: this.state.recentWorkspaces ?? [],
+    });
+    for (const warning of discovered.warnings) await this.log(`workspace discovery warning: ${warning}`);
+    const snapshot = this.workspaceSnapshots.create({
+      chatId,
+      ownerOpenId: this.state.ownerOpenId ?? '',
+      candidates: discovered.candidates,
+      warnings: discovered.warnings,
+      partial: discovered.partial,
+    });
+    return discovered.candidates.length > 0
+      ? this.sessionWorkspaceView(snapshot, draft)
+      : this.manualSessionCreateView(snapshot, draft);
+  }
+
+  private sessionWorkspaceView(snapshot: WorkspaceSnapshot, draft: SessionCreateDraft): SessionCreateView {
+    const visibleCandidates = snapshot.candidates.slice(0, 99);
+    return {
+      mode: 'projects', snapshotId: snapshot.id, page: 0, pageCount: 1,
+      hasProjectCandidates: snapshot.candidates.length > 0,
+      candidates: visibleCandidates,
+      warnings: snapshot.warnings,
+      partial: snapshot.partial || visibleCandidates.length < snapshot.candidates.length,
+      draft,
+    };
+  }
+
+  private sessionCreateRetryView(snapshot: WorkspaceSnapshot | undefined, draft: SessionCreateDraft): SessionCreateView {
+    return snapshot && snapshot.candidates.length > 0
+      ? this.sessionWorkspaceView(snapshot, draft)
+      : this.manualSessionCreateView(snapshot, draft);
+  }
+
+  private manualSessionCreateView(
+    snapshot: WorkspaceSnapshot | undefined,
+    draft: SessionCreateDraft,
+    requestedPage = 0,
+  ): SessionCreateView {
+    const pageCount = Math.max(1, Math.ceil((snapshot?.candidates.length ?? 0) / 20));
+    const page = Math.max(0, Math.min(pageCount - 1, requestedPage));
+    const noCandidates = snapshot && snapshot.candidates.length === 0
+      ? ['尚未发现可选项目；请手动填写路径，或在本机运行 lca workspace add ~/workspace。']
+      : [];
+    return {
+      mode: 'manual', snapshotId: snapshot?.id, page,
+      hasProjectCandidates: (snapshot?.candidates.length ?? 0) > 0,
+      pageCount, candidates: [],
+      warnings: [...(snapshot?.warnings ?? []), ...noCandidates], partial: snapshot?.partial ?? false,
+      draft: { ...draft, manualCwd: draft.manualCwd ?? (draft.cwd !== SESSION_CREATE_MANUAL_VALUE ? draft.cwd : undefined) },
+    };
+  }
+
+  private async rememberSessionWorkspace(cwd: string): Promise<void> {
+    this.state = {
+      ...this.state,
+      recentWorkspaces: rememberRecentWorkspace(this.state.recentWorkspaces, cwd),
+      updatedAt: Date.now(),
+    };
+    await this.store.saveState(this.state).catch((error) => this.log(
+      `failed to persist recent workspace: cwd=${cwd} error=${errorMessage(error)}`,
+    ));
+  }
+
   private async log(message: string): Promise<void> {
     await appendFile(this.paths.logFile, `${new Date().toISOString()} ${message}\n`, { mode: 0o600 });
   }
@@ -1939,26 +2066,34 @@ function remember(values: Set<string>, value: string, limit: number): void {
   }
 }
 
-function startRequestFromForm(
-  values: Record<string, unknown>,
-): { ok: true; value: StartSessionRequest } | { ok: false; error: string } {
+function sessionCreateDraftFromForm(values: Record<string, unknown>): SessionCreateDraft {
   const sessionId = formString(values[SESSION_CREATE_NAME_FIELD]);
   const agentValue = formString(values[SESSION_CREATE_AGENT_FIELD]);
-  const cwd = formString(values[SESSION_CREATE_CWD_FIELD]);
+  const projectCwd = formString(values[SESSION_CREATE_PROJECT_FIELD]);
+  const manualCwd = formString(values[SESSION_CREATE_CWD_FIELD]);
   const resumeMode = formString(values[SESSION_CREATE_RESUME_FIELD]) || 'new';
+  const cwd = projectCwd === SESSION_CREATE_MANUAL_VALUE
+    ? manualCwd
+    : projectCwd || manualCwd;
+  return {
+    sessionId: sessionId || undefined,
+    agent: normalizeAgentId(agentValue) ?? 'codex',
+    resumeMode: resumeMode === 'picker' ? 'picker' : 'new',
+    cwd: cwd || undefined,
+    projectCwd: projectCwd || undefined,
+    manualCwd: manualCwd || undefined,
+  };
+}
+
+function startRequestFromDraft(
+  draft: SessionCreateDraft,
+): { ok: true; value: StartSessionRequest } | { ok: false; error: string } {
+  const sessionId = draft.sessionId?.trim() ?? '';
   if (!sessionId) return { ok: false, error: '请填写 Session 名称。' };
-  const agent = normalizeAgentId(agentValue);
-  if (!agent) return { ok: false, error: '请选择有效的 Agent：codex、traex 或 claude。' };
-  if (!cwd) return { ok: false, error: '请填写绝对工作目录。' };
+  if (!draft.cwd || draft.cwd === SESSION_CREATE_MANUAL_VALUE) return { ok: false, error: '请选择或填写项目目录。' };
   let resume: AgentResume | undefined;
-  if (resumeMode === 'last') {
-    return { ok: false, error: '飞书已不再支持“恢复上次会话”，请重新打开表单并使用 Resume Picker。' };
-  }
-  if (resumeMode === 'picker') resume = { mode: 'picker' };
-  else if (resumeMode !== 'new') {
-    return { ok: false, error: '无法识别启动方式，请重新打开新建 Session 表单。' };
-  }
-  return { ok: true, value: { sessionId, agent, cwd, resume } };
+  if (draft.resumeMode === 'picker') resume = { mode: 'picker' };
+  return { ok: true, value: { sessionId, agent: draft.agent, cwd: draft.cwd, resume } };
 }
 
 function formString(value: unknown): string {
@@ -1985,7 +2120,9 @@ function remoteError(result: DaemonResult): string {
   const context = result.errorContext ?? {};
   const sessionId = typeof context.sessionId === 'string' ? context.sessionId : '该名称';
   switch (result.errorCode) {
-    case 'SESSION_EXISTS': return `无法启动 session「${sessionId}」：该 session 已在运行。请换一个名称，或用 /sessions 连接现有 session。`;
+    case 'SESSION_EXISTS': return context.source === 'tmux'
+      ? `无法启动 session「${sessionId}」：检测到同名 tmux 会话，但它未登记为可连接的 LCA session。请换一个名称，或在本机检查 tmux 会话。`
+      : `无法启动 session「${sessionId}」：该 session 已在运行。请换一个名称，或用 /sessions 连接现有 session。`;
     case 'AGENT_SESSION_IN_USE': {
       const ownerSessionId = typeof context.ownerSessionId === 'string' ? context.ownerSessionId : '现有 session';
       return `无法启动 session「${sessionId}」：该 Agent 原生 session 已由 LCA session「${ownerSessionId}」连接。请用 /sessions 连接现有 session。`;

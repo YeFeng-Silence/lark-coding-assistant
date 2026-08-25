@@ -10,6 +10,8 @@ export interface SignedAction {
   interactionKind?: ChoiceInteractionKind;
   sessionId?: string;
   manualMode?: 'explicit' | 'fallback';
+  snapshotId?: string;
+  page?: number;
   agent: AgentId;
   action: string;
   paneId: string;
@@ -66,6 +68,8 @@ export class ActionSigner {
       value.interactionKind ?? null,
       value.sessionId ?? null,
       value.manualMode ?? null,
+      value.snapshotId ?? null,
+      value.page ?? null,
       value.agent,
       value.action,
       value.paneId,
@@ -99,6 +103,8 @@ function isSignedAction(value: unknown): value is SignedAction {
     && (item.kind !== 'choice' || item.interactionKind === 'approval' || item.interactionKind === 'question' || item.interactionKind === 'choice')
     && (item.kind !== 'manual' || (typeof item.sessionId === 'string'
       && (item.manualMode === 'explicit' || item.manualMode === 'fallback')))
+    && (item.snapshotId === undefined || typeof item.snapshotId === 'string')
+    && (item.page === undefined || (typeof item.page === 'number' && Number.isInteger(item.page) && item.page >= 0))
     && ((item.kind !== 'session-stop' && item.kind !== 'session-start-error'
       && item.kind !== 'resume-picker' && item.kind !== 'startup-conflict')
       || typeof item.sessionId === 'string')

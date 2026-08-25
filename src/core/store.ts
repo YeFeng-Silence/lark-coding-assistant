@@ -5,6 +5,7 @@ import { emptyState } from './model.js';
 import type { AppPaths } from './paths.js';
 import { readJson, writeJsonAtomic } from './atomic-json.js';
 import { normalizeAgentId } from '../agents/types.js';
+import { normalizeWorkspacePath, normalizeWorkspaceRoots, validateWorkspaceDirectory } from '../workspace/path.js';
 
 export class AppStore {
   constructor(readonly paths: AppPaths) {}
@@ -34,11 +35,15 @@ export class AppStore {
         claude: binaries.claude ?? binaries['claude-code'] ?? 'claude',
       },
       pollIntervalMs: config.pollIntervalMs,
+      workspaceRoots: normalizeWorkspaceRoots(config.workspaceRoots ?? []),
     };
   }
 
   saveConfig(config: AppConfig): Promise<void> {
-    return writeJsonAtomic(this.paths.config, config);
+    return writeJsonAtomic(this.paths.config, {
+      ...config,
+      workspaceRoots: normalizeWorkspaceRoots(config.workspaceRoots),
+    });
   }
 
   loadSecrets(): Promise<AppSecrets | undefined> {
@@ -56,7 +61,8 @@ export class AppStore {
       const agent = normalizeAgentId(session.agent);
       return agent ? [[id, { ...session, agent }]] : [];
     }));
-    return { ...state, sessions };
+    const recentWorkspaces = await normalizeRecentWorkspaces(state.recentWorkspaces ?? []);
+    return { ...state, sessions, recentWorkspaces };
   }
 
   saveState(state: SessionState): Promise<void> {
@@ -64,8 +70,32 @@ export class AppStore {
   }
 }
 
-interface LegacyConfig extends Omit<AppConfig, 'agentBinaries'> {
+interface LegacyConfig extends Omit<AppConfig, 'agentBinaries' | 'workspaceRoots'> {
   agentBinaries: Partial<Record<'codex' | 'traex' | 'claude' | 'trae-cli' | 'claude-code', string>>;
+  workspaceRoots?: string[];
+}
+
+async function normalizeRecentWorkspaces(
+  values: NonNullable<SessionState['recentWorkspaces']>,
+): Promise<NonNullable<SessionState['recentWorkspaces']>> {
+  const unique = new Set<string>();
+  const result: NonNullable<SessionState['recentWorkspaces']> = [];
+  const ordered = [...values].sort((left, right) => right.lastUsedAt - left.lastUsedAt);
+  for (const value of ordered) {
+    if (result.length >= 30) break;
+    if (!Number.isFinite(value.lastUsedAt)) continue;
+    let cwd: string;
+    try {
+      cwd = normalizeWorkspacePath(value.cwd);
+      await validateWorkspaceDirectory(cwd);
+    } catch {
+      continue;
+    }
+    if (unique.has(cwd)) continue;
+    unique.add(cwd);
+    result.push({ cwd, lastUsedAt: value.lastUsedAt });
+  }
+  return result;
 }
 
 interface LegacyState extends Omit<SessionState, 'sessions'> {

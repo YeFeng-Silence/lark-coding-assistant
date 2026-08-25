@@ -8,6 +8,12 @@ export interface AppConfig {
   tmuxBinary: string;
   agentBinaries: Record<AgentId, string>;
   pollIntervalMs: number;
+  workspaceRoots: string[];
+}
+
+export interface RecentWorkspace {
+  cwd: string;
+  lastUsedAt: number;
 }
 
 export interface AppSecrets {
@@ -33,6 +39,7 @@ export interface SessionState {
   autoBindDisabled?: boolean;
   activeSessionId?: string;
   sessions?: Record<string, ManagedSession>;
+  recentWorkspaces?: RecentWorkspace[];
   bindCodeHash?: string;
   bindCodeExpiresAt?: number;
   updatedAt: number;

@@ -15,6 +15,7 @@ import type { RuntimeStatus } from '../../src/daemon/protocol.js';
 import type { ManualControlView } from '../../src/lark/cards.js';
 import type { SessionStartupFailure } from '../../src/session/startup-failure.js';
 import { runFile } from '../../src/platform/process.js';
+import type { SessionCreateView } from '../../src/workspace/session-create.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -62,6 +63,7 @@ rl.on('line', (line) => {
     await store.saveConfig({
       tenant: 'feishu', appId: 'cli_test', tmuxBinary: 'tmux',
       agentBinaries: { codex: fakeCodex, 'traex': fakeCodex, 'claude': fakeCodex }, pollIntervalMs: 50,
+      workspaceRoots: [],
     });
     await store.saveSecrets({ appSecret: 'test', callbackSecret: 'callback-test' });
     await store.saveState({ schemaVersion: 2, ownerOpenId: 'ou_owner', sessions: {}, updatedAt: Date.now() });
@@ -178,6 +180,8 @@ rl.on('line', (line) => {
     expect(fake.sessionPickers.at(-1)?.sessions.map(({ id }) => id)).toEqual(['default', 'second']);
     await fake.emit(message('/start'));
     expect(fake.sessionCreateChats.at(-1)).toBe('oc_owner');
+    const sessionCreateView = fake.sessionCreateViews.at(-1) as SessionCreateView;
+    expect(sessionCreateView.candidates.some((candidate) => candidate.cwd === root)).toBe(true);
     fake.failNextSessionPicker = true;
     await fake.emit(message('/sessions'));
     expect(fake.texts.at(-1)?.text).toContain('Session 选择卡片发送失败');
@@ -226,11 +230,24 @@ rl.on('line', (line) => {
     await fake.emit(message('/use default'));
     await requestDaemon(paths.socket, { method: 'stop', sessionId: 'remote' });
 
-    const cardCreated = await fake.emitSignedFormAction({
-      v: 1, kind: 'session-create', agent: 'codex', action: 'submit', paneId: '', fingerprint: 'create',
-      chatId: 'oc_owner', nonce: 'form-nonce', expiresAt: Date.now() + 60_000, sig: 'test',
+    const invalidManual = await fake.emitSignedFormAction({
+      v: 1, kind: 'session-create', agent: 'claude', action: 'submit', paneId: '', fingerprint: 'projects',
+      chatId: 'oc_owner', nonce: 'form-invalid-manual', expiresAt: Date.now() + 60_000, sig: 'test',
+      snapshotId: sessionCreateView.snapshotId, page: sessionCreateView.page,
     }, {
-      session_name: 'cardremote', session_agent: 'traex', session_cwd: root, session_resume: 'new',
+      session_name: 'manual-project', session_agent: 'claude', session_project: '__manual__',
+      session_cwd: 'relative/path', session_resume: 'new',
+    });
+    expect(invalidManual).toMatchObject({
+      type: 'error', content: expect.stringContaining('工作目录不可用'),
+    });
+
+    const cardCreated = await fake.emitSignedFormAction({
+      v: 1, kind: 'session-create', agent: 'codex', action: 'submit', paneId: '', fingerprint: 'projects',
+      chatId: 'oc_owner', nonce: 'form-nonce', expiresAt: Date.now() + 60_000, sig: 'test',
+      snapshotId: sessionCreateView.snapshotId, page: sessionCreateView.page,
+    }, {
+      session_name: 'cardremote', session_agent: 'traex', session_project: root, session_resume: 'new',
     });
     expect(cardCreated).toMatchObject({ type: 'session-created', session: { id: 'cardremote', agent: 'traex' } });
     const legacyLast = await fake.emitSignedFormAction({
@@ -361,6 +378,7 @@ class FakeGateway implements RemoteGateway {
   markdowns: Array<{ chatId: string; markdown: string }> = [];
   sessionPickers: Array<{ chatId: string; sessions: ManagedSession[]; activeSessionId?: string }> = [];
   sessionCreateChats: string[] = [];
+  sessionCreateViews: SessionCreateView[] = [];
   statuses: Array<RuntimeStatus> = [];
   manualViews: ManualControlView[] = [];
   startupFailures: SessionStartupFailure[] = [];
@@ -385,7 +403,10 @@ class FakeGateway implements RemoteGateway {
   };
   sendResumePicker = async (): Promise<void> => undefined;
   sendStartupConflict = async (): Promise<void> => undefined;
-  sendSessionCreate = async (chatId: string): Promise<void> => { this.sessionCreateChats.push(chatId); };
+  sendSessionCreate = async (chatId: string, view: SessionCreateView): Promise<void> => {
+    this.sessionCreateChats.push(chatId);
+    this.sessionCreateViews.push(view);
+  };
   sendSessionStartupFailure = async (_chatId: string, failure: SessionStartupFailure): Promise<void> => {
     this.startupFailures.push(failure);
   };

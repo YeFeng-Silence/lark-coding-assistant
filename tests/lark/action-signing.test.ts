@@ -75,6 +75,17 @@ describe('ActionSigner', () => {
     expect(signer.verify(action, 'oc_1')).toEqual(action);
   });
 
+  it('binds session-create actions to a workspace snapshot and page', () => {
+    const signer = new ActionSigner('secret', () => 1000);
+    const action = signer.sign({
+      kind: 'session-create', agent: 'codex', action: 'next', paneId: '', fingerprint: 'create', chatId: 'oc_1',
+      snapshotId: 'snapshot-1', page: 2,
+    });
+    expect(signer.verify({ ...action, page: 3 }, 'oc_1')).toBeUndefined();
+    expect(signer.verify({ ...action, snapshotId: 'snapshot-2' }, 'oc_1')).toBeUndefined();
+    expect(signer.verify(action, 'oc_1')).toEqual(action);
+  });
+
   it('signs manual actions with a bound session and rejects tampering', () => {
     const signer = new ActionSigner('secret', () => 1000);
     const action = signer.sign({
