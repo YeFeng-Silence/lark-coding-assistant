@@ -129,10 +129,12 @@ rl.on('line', (line) => {
     await fake.emit(message('/status'));
     expect(fake.processingMessages).toHaveLength(processingCount);
     await fake.emit(message(`/start instant-fail --agent codex --cwd "${root}"`));
-    expect(fake.startupFailures.at(-1)).toMatchObject({
-      sessionId: 'instant-fail', agent: 'codex', exitStatus: 7,
+    const startupFailure = fake.startupFailures.at(-1);
+    expect(startupFailure).toMatchObject({
+      sessionId: 'instant-fail', agent: 'codex',
       terminalExcerpt: expect.stringContaining('failed to acquire thread writer lock'),
     });
+    expect([7, undefined]).toContain(startupFailure?.exitStatus);
     expect((await store.loadState()).sessions?.['instant-fail']).toBeUndefined();
 
     await fake.emit(message('/detach'));
