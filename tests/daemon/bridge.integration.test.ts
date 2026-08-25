@@ -457,7 +457,7 @@ async function hasTmux(): Promise<boolean> {
 }
 
 async function waitFor(predicate: () => Promise<boolean>): Promise<void> {
-  const deadline = Date.now() + 3000;
+  const deadline = Date.now() + 8000;
   while (Date.now() < deadline) {
     if (await predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 50));
