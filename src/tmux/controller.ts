@@ -225,5 +225,5 @@ function parsePane(line: string): TmuxPane | undefined {
 function tmuxTargetMissing(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   const stderr = error && typeof error === 'object' && 'stderr' in error ? String(error.stderr) : '';
-  return /can't find (?:pane|session|window)|no such (?:pane|session|window)|(?:pane|session|window) not found/i.test(`${message}\n${stderr}`);
+  return /can't find (?:pane|session|window)|no such (?:pane|session|window)|(?:pane|session|window) not found|no server running/i.test(`${message}\n${stderr}`);
 }
