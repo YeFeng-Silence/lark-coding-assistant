@@ -1453,12 +1453,25 @@ export class AssistantDaemon {
       if (focusedIndex === targetIndex) return { ok: true };
       const direction = targetIndex > focusedIndex ? 'Down' : 'Up';
       await this.tmux.sendKey(paneId, direction);
-      await new Promise((resolve) => setTimeout(resolve, 40));
-      await this.poll();
-      const nextFocused = this.screen?.actions.findIndex(({ focused }) => focused) ?? -1;
-      if (nextFocused === focusedIndex) return { ok: false, error: 'terminal focus did not move as expected' };
+      const moved = await this.waitForFocusMove(interactionId, focusedIndex);
+      if (!moved.ok) return moved;
     }
     return { ok: false, error: 'terminal focus navigation exceeded its safe step limit' };
+  }
+
+  private async waitForFocusMove(interactionId: string | undefined, previousIndex: number): Promise<DaemonResult> {
+    const deadline = Date.now() + 1_200;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      await this.poll();
+      const interaction = this.screen?.interaction;
+      if (!interaction || interaction.interactionId !== interactionId) {
+        return { ok: false, error: 'interaction changed while navigating; refusing action' };
+      }
+      const focusedIndex = this.screen?.actions.findIndex(({ focused }) => focused) ?? -1;
+      if (focusedIndex !== -1 && focusedIndex !== previousIndex) return { ok: true };
+    }
+    return { ok: false, error: 'terminal focus did not move before the navigation timeout' };
   }
 
   private async waitForInteractionChange(interactionId?: string): Promise<void> {
