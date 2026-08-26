@@ -189,6 +189,58 @@ esc to interrupt`);
 });
 
 describe('single-choice custom input', () => {
+  it('waits for a delayed Codex focus render before pressing Enter', async () => {
+    const screen = detectCodexScreen(`Field 1/1 (1 required unanswered)
+Allow the MCP server to run this tool?
+› 1. Allow                    Run the tool and continue.
+  2. Allow for this session   Remember this choice for this session.
+  3. Always allow             Remember this choice for future calls.
+  4. Cancel                   Cancel this tool call.
+enter to submit | esc to cancel`);
+    const session = {
+      id: 'codex-delayed', agent: 'codex' as const, sessionName: 'lca-codex-delayed', paneId: '%5',
+      cwd: '/tmp', agentVersion: '0.148.0', updatedAt: 1,
+    };
+    const daemon = Object.create(AssistantDaemon.prototype) as AssistantDaemon;
+    const internal = daemon as unknown as {
+      state: SessionState;
+      screen: ScreenDetection;
+      poll(): Promise<void>;
+      tmux: { sendKey(paneId: string, key: string): Promise<void> };
+      submitChoice(choice: string, fingerprint: string, expectedKind: 'approval'): Promise<{ ok: boolean }>;
+    };
+    internal.state = { schemaVersion: 2, activeSessionId: session.id, sessions: { [session.id]: session }, updatedAt: 1 };
+    internal.screen = screen;
+    let pollsAfterMove = 0;
+    let moveRequested = false;
+    internal.poll = async () => {
+      if (!moveRequested) return;
+      pollsAfterMove += 1;
+      if (pollsAfterMove < 2) return;
+      internal.screen = {
+        ...internal.screen,
+        actions: internal.screen.actions.map((item, index) => ({ ...item, focused: index === 1 })),
+      };
+    };
+    const keys: string[] = [];
+    internal.tmux = {
+      sendKey: async (_paneId: string, key: string) => {
+        keys.push(key);
+        if (key === 'Down') moveRequested = true;
+      },
+    };
+
+    const result = await internal.submitChoice(
+      '2',
+      screen.interaction?.revision ?? screen.fingerprint,
+      'approval',
+    );
+
+    expect(result.ok).toBe(true);
+    expect(pollsAfterMove).toBe(2);
+    expect(keys).toEqual(['Down', 'Enter']);
+  });
+
   it('opens the detected Codex notes editor without prematurely submitting the choice', async () => {
     const screen = detectCodexScreen(`Question 1/1 (1 unanswered)
 请选择验证环境
