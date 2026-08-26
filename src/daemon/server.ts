@@ -10,6 +10,7 @@ import type { AppPaths } from '../core/paths.js';
 import { AppError, isAppError, serializeAppError, systemErrorCode } from '../core/errors.js';
 import { validateStartSessionRequest, type StartSessionRequest } from '../session/start-request.js';
 import { sessionStartupFailure } from '../session/startup-failure.js';
+import { SessionStartCoordinator, type SessionStartContext, type SessionStartSource } from '../session/start-coordinator.js';
 import { SessionReconciler } from '../session/reconciler.js';
 import { resolveNativeAgentSessionId } from '../session/native-session.js';
 import { TmuxController } from '../tmux/controller.js';
@@ -73,6 +74,8 @@ export class AssistantDaemon {
   private readonly pendingResumePickers = new Map<string, StartSessionRequest>();
   private readonly pendingStartupConflicts = new Map<string, { request: StartSessionRequest; ownerSessionId: string }>();
   private readonly workspaceSnapshots = new WorkspaceSnapshotStore();
+  private readonly sessionStarts: SessionStartCoordinator;
+  private startStateWrites: Promise<void> = Promise.resolve();
   private pendingInteractionInput?: {
     sessionId: string;
     interactionId: string;
@@ -94,7 +97,10 @@ export class AssistantDaemon {
     private readonly stopHookCommand = 'lark-coding-assistant-hook',
     private readonly completionQuietMs = 2_500,
     private readonly appVersion = 'dev',
-  ) {}
+    sessionStartTimeoutMs = 30_000,
+  ) {
+    this.sessionStarts = new SessionStartCoordinator(sessionStartTimeoutMs, (message) => this.log(message));
+  }
 
   async start(): Promise<void> {
     await this.store.ensure();
@@ -108,9 +114,9 @@ export class AssistantDaemon {
       this.sessionName,
       3,
       (message) => this.log(message),
-      async (agent) => {
+      async (agent, signal) => {
         const adapter = getAgentAdapter(agent);
-        return (await runFile(adapter.binary(this.config), [...adapter.versionArgs])).stdout.trim();
+        return (await runFile(adapter.binary(this.config), [...adapter.versionArgs], { signal })).stdout.trim();
       },
     );
     const secrets = await this.store.loadSecrets();
@@ -229,6 +235,7 @@ export class AssistantDaemon {
     cwd: string,
     agentId: AgentId,
     resume?: AgentResume,
+    source: SessionStartSource = 'cli',
   ): Promise<DaemonResult> {
     try {
       const validated = await validateStartSessionRequest({ sessionId, cwd, agent: agentId, resume });
@@ -236,7 +243,35 @@ export class AssistantDaemon {
     } catch (error) {
       return fail(error);
     }
-    await this.reconcileSessions(true);
+    let createdSessionName: string | undefined;
+    const outcome = await this.sessionStarts.run(
+      { sessionId, cwd, agent: agentId, resume, source },
+      async (context) => {
+        const result = await this.startSessionCore(
+          sessionId,
+          cwd,
+          agentId,
+          resume,
+          context,
+          (sessionName) => { createdSessionName = sessionName; },
+        );
+        if (!result.ok) throw daemonResultAppError(result);
+        return result.value;
+      },
+      async (_context, error) => this.cleanupStartTransaction(sessionId, createdSessionName, error),
+    );
+    return outcome.ok ? { ok: true, value: outcome.value } : fail(outcome.error);
+  }
+
+  private async startSessionCore(
+    sessionId: string,
+    cwd: string,
+    agentId: AgentId,
+    resume: AgentResume | undefined,
+    context: SessionStartContext,
+    created: (sessionName: string) => void,
+  ): Promise<DaemonResult> {
+    await context.stage('reconcile', () => this.reconcileSessions(true, context.signal));
     const existing = this.state.sessions?.[sessionId];
     if (existing) {
       return fail(new AppError(
@@ -256,16 +291,21 @@ export class AssistantDaemon {
     const binary = adapter.binary(this.config);
     let agentVersion: string;
     try {
-      agentVersion = (await runFile(binary, [...adapter.versionArgs])).stdout.trim();
+      agentVersion = (await context.stage('agent-version', () => runFile(binary, [...adapter.versionArgs], {
+        timeoutMs: context.remainingMs(),
+        signal: context.signal,
+      }))).stdout.trim();
     } catch (error) {
-      return fail(systemErrorCode(error) === 'ENOENT'
+      return fail(isAppError(error)
+        ? error
+        : systemErrorCode(error) === 'ENOENT'
         ? new AppError('BINARY_NOT_FOUND', `command not found: ${binary}`, { binary }, { cause: error })
         : new AppError('START_FAILED', `failed to inspect agent binary: ${binary}`, { sessionId }, { cause: error }));
     }
     const tmuxSessionName = `${this.sessionName}-${sessionId}`;
     let pane;
     try {
-      pane = await this.tmux.create({
+      pane = await context.stage('tmux-create', () => this.tmux.create({
         sessionName: tmuxSessionName,
         cwd,
         binary,
@@ -279,7 +319,9 @@ export class AssistantDaemon {
           LARK_CODING_ASSISTANT_AGENT: agentId,
         },
         preserveOnExit: true,
-      });
+        signal: context.signal,
+      }));
+      created(pane.sessionName);
     } catch (error) {
       return fail(isAppError(error)
         ? error
@@ -296,81 +338,148 @@ export class AssistantDaemon {
       updatedAt: Date.now(),
     };
     const pendingClaim = this.pendingAgentSessionClaims.get(sessionId);
-    if (pendingClaim?.agent === agentId) {
-      const owner = this.findAgentSessionOwner(agentId, pendingClaim.agentSessionId, sessionId);
-      if (owner) {
-        this.pendingAgentSessionClaims.delete(sessionId);
-        await this.tmux.killSession(pane.sessionName).catch(() => undefined);
-        return fail(agentSessionInUse(sessionId, owner.id));
+    if (pendingClaim) {
+      const claimed = this.claimStartingAgentSession(session, pendingClaim);
+      if (!claimed.ok) return claimed;
+    }
+    if (resume && resume.mode !== 'picker') {
+      const initialClaim = await context.stage(
+        'agent-identity',
+        () => this.waitForInitialAgentSessionClaim(session, pane.pid, context.signal),
+      );
+      if (!initialClaim.ok) {
+        return initialClaim;
       }
-      session.agentSessionId = pendingClaim.agentSessionId;
-      this.pendingAgentSessionClaims.delete(sessionId);
+    } else {
+      const stable = await context.stage(
+        'startup-stability',
+        () => this.waitForStartupStability(session, 500, context.signal),
+      );
+      if (!stable.ok) {
+        return stable;
+      }
+    }
+    const resumePicker = resume?.mode === 'picker' && context.source === 'lark'
+      ? await context.stage('resume-picker', async () => {
+          const picker = await this.waitForResumePicker(
+            session,
+            undefined,
+            context.remainingMs(),
+            context.signal,
+          );
+          if (!picker) {
+            throw new AppError('START_FAILED', 'agent resume picker did not become available', {
+              sessionId,
+              agent: agentId,
+            });
+          }
+          return picker;
+        })
+      : undefined;
+    if (resume?.mode !== 'picker') {
+      await this.tmux.preserveOnExit(session.sessionName, false, context.signal).catch((error) => this.log(
+        `failed to disable startup preservation for ${sessionId}: ${errorMessage(error)}`,
+      ));
+      await this.rememberSessionWorkspace(session.cwd);
+    }
+    const lateClaim = this.pendingAgentSessionClaims.get(sessionId);
+    if (lateClaim) {
+      const claimed = this.claimStartingAgentSession(session, lateClaim);
+      if (!claimed.ok) return claimed;
     }
     try {
-      await this.tmux.writeMetadata(pane.sessionName, {
+      await context.stage('metadata', () => this.tmux.writeMetadata(pane.sessionName, {
         managed: true,
         sessionId,
         agent: agentId,
         cwd,
         agentVersion,
         agentSessionId: session.agentSessionId,
-      });
+      }, context.signal));
+      await context.stage('state', () => this.commitStartedSession(session, binding));
     } catch (error) {
-      await this.tmux.killSession(pane.sessionName).catch((cleanupError) => this.log(
-        `failed to clean session ${sessionId} after metadata error: ${errorMessage(cleanupError)}`,
-      ));
-      return fail(new AppError('START_FAILED', 'failed to persist tmux session metadata', { sessionId }, { cause: error }));
+      return fail(isAppError(error)
+        ? error
+        : new AppError('START_FAILED', 'failed to persist completed session', { sessionId }, { cause: error }));
     }
-    const nextState: SessionState = {
-      ...this.state,
-      sessions: { ...this.state.sessions, [sessionId]: session },
-      activeSessionId: this.state.activeSessionId ?? sessionId,
-      boundChatId: binding.mode === 'reused' ? this.state.boundChatId : undefined,
-      bindCodeHash: binding.mode === 'code' ? hashBindCode(binding.bindCode) : undefined,
-      bindCodeExpiresAt: binding.mode === 'code' ? Date.now() + 10 * 60_000 : undefined,
-      updatedAt: Date.now(),
-    };
-    try {
-      await this.store.saveState(nextState);
-    } catch (error) {
-      await this.tmux.killSession(pane.sessionName).catch((cleanupError) => this.log(
-        `failed to clean session ${sessionId} after state error: ${errorMessage(cleanupError)}`,
-      ));
-      return fail(new AppError('START_FAILED', 'failed to persist session state', { sessionId }, { cause: error }));
-    }
-    this.state = nextState;
-    const lateClaim = this.pendingAgentSessionClaims.get(sessionId);
-    if (lateClaim) {
-      const claimed = await this.handleAgentSessionStarted(lateClaim);
-      if (!claimed.ok) {
-        await this.stopSession(sessionId).catch(() => undefined);
-        return claimed;
-      }
-    }
-    if (resume && resume.mode !== 'picker') {
-      const initialClaim = await this.waitForInitialAgentSessionClaim(sessionId, pane.pid);
-      if (!initialClaim.ok) {
-        await this.stopSession(sessionId).catch(() => undefined);
-        return initialClaim;
-      }
-    } else if (!resume) {
-      const stable = await this.waitForStartupStability(session, 500);
-      if (!stable.ok) {
-        await this.stopSession(sessionId).catch(() => undefined);
-        return stable;
-      }
-    }
-    if (resume?.mode !== 'picker') {
-      await this.tmux.preserveOnExit(session.sessionName, false).catch((error) => this.log(
-        `failed to disable startup preservation for ${sessionId}: ${errorMessage(error)}`,
-      ));
-      await this.rememberSessionWorkspace(session.cwd);
+    const postCommitClaim = this.pendingAgentSessionClaims.get(sessionId);
+    if (postCommitClaim) {
+      const claimed = await this.handleAgentSessionStarted(postCommitClaim);
+      if (!claimed.ok) return claimed;
     }
     await this.log(
       `session created: session=${session.id} agent=${session.agent} pane=${session.paneId} active=${this.state.activeSessionId === session.id}`,
     );
-    await this.poll().catch((error) => this.log(`initial poll failed for ${sessionId}: ${errorMessage(error)}`));
-    return { ok: true, value: { pane, session, binding, active: this.state.activeSessionId === sessionId } };
+    return {
+      ok: true,
+      value: { pane, session, binding, active: this.state.activeSessionId === sessionId, resumePicker },
+    };
+  }
+
+  private async cleanupStartTransaction(
+    sessionId: string,
+    createdSessionName: string | undefined,
+    error: AppError,
+  ): Promise<void> {
+    const session = this.state.sessions?.[sessionId];
+    const ownsSession = Boolean(createdSessionName && session?.sessionName === createdSessionName);
+    const createdPane = createdSessionName
+      ? await this.tmux.findBySession(createdSessionName, AbortSignal.timeout(750)).catch(() => undefined)
+      : undefined;
+    const paneId = ownsSession ? session?.paneId : createdPane?.paneId;
+    if (paneId && !error.context.terminalExcerpt) {
+      const terminalExcerpt = await this.tmux.capture(paneId, 40, AbortSignal.timeout(1_000))
+        .then((output) => startupTerminalExcerpt(tailScreen(output, 40).slice(-3_000)))
+        .catch(() => '');
+      if (terminalExcerpt) error.context.terminalExcerpt = terminalExcerpt;
+    }
+    if (session && ownsSession) {
+      await this.stopSession(sessionId, AbortSignal.timeout(2_000)).catch((cleanupError) => this.log(
+        `session start state cleanup failed: session=${sessionId} detail=${errorMessage(cleanupError)}`,
+      ));
+      if (this.state.sessions?.[sessionId]?.sessionName === createdSessionName) {
+        await this.forgetSessionState(sessionId).catch((cleanupError) => this.log(
+          `session start forced state cleanup failed: session=${sessionId} detail=${errorMessage(cleanupError)}`,
+        ));
+      }
+    } else if (createdSessionName) {
+      await this.tmux.killSession(createdSessionName, AbortSignal.timeout(2_000)).catch((cleanupError) => this.log(
+        `session start tmux cleanup failed: session=${sessionId} detail=${errorMessage(cleanupError)}`,
+      ));
+    }
+    this.pendingAgentSessionClaims.delete(sessionId);
+    this.pendingResumePickers.delete(sessionId);
+    this.pendingStartupConflicts.delete(sessionId);
+  }
+
+  private commitStartedSession(
+    session: ManagedSession,
+    binding:
+      | { mode: 'reused' }
+      | { mode: 'awaiting-owner-message' }
+      | { mode: 'code'; bindCode: string; expiresInSeconds: number },
+  ): Promise<void> {
+    const commit = async (): Promise<void> => {
+      if (this.state.sessions?.[session.id]) {
+        throw new AppError('SESSION_EXISTS', `managed coding-agent session is already running: ${session.id}`, {
+          sessionId: session.id,
+        });
+      }
+      const nextState: SessionState = {
+        ...this.state,
+        sessions: { ...this.state.sessions, [session.id]: session },
+        activeSessionId: this.state.activeSessionId ?? session.id,
+        boundChatId: binding.mode === 'reused' ? this.state.boundChatId : undefined,
+        bindCodeHash: binding.mode === 'code' ? hashBindCode(binding.bindCode) : undefined,
+        bindCodeExpiresAt: binding.mode === 'code' ? Date.now() + 10 * 60_000 : undefined,
+        updatedAt: Date.now(),
+      };
+      await this.store.saveState(nextState);
+      this.state = nextState;
+    };
+    const pending = this.startStateWrites.then(commit, commit);
+    this.startStateWrites = pending.catch(() => undefined);
+    return pending;
   }
 
   private createSessionBinding():
@@ -1006,22 +1115,43 @@ export class AssistantDaemon {
     const optionId = action.action.startsWith('select:') ? action.action.slice('select:'.length) : '';
     const option = picker.options.find((candidate) => candidate.id === optionId);
     if (!option) return { type: 'resume-picker', content: '所选项已变化，已刷新。', session, picker };
-    const delta = option.visibleIndex - picker.selectedIndex;
-    const key = delta < 0 ? 'Up' : 'Down';
-    for (let step = 0; step < Math.abs(delta); step += 1) await this.tmux.sendKey(session.paneId, key);
-    const pane = await this.tmux.inspect(session.paneId);
-    if (!pane || pane.dead) {
-      this.pendingResumePickers.delete(sessionId);
-      return larkStartupError(fail(await this.startupExitedError(session, pane)), request);
-    }
-    await this.tmux.sendKey(session.paneId, 'Enter');
-    this.pendingResumePickers.delete(sessionId);
-    const claimed = await this.waitForInitialAgentSessionClaim(sessionId, pane.pid);
-    if (!claimed.ok) {
-      await this.stopSession(sessionId).catch(() => undefined);
-      if (claimed.errorCode === 'AGENT_SESSION_IN_USE') {
-        const ownerSessionId = typeof claimed.errorContext?.ownerSessionId === 'string'
-          ? claimed.errorContext.ownerSessionId
+    const restored = await this.sessionStarts.run(
+      { sessionId, agent: session.agent, cwd: session.cwd, resume: request.resume, source: 'resume-picker' },
+      async (context) => {
+        const restoringSession = { ...session };
+        const delta = option.visibleIndex - picker.selectedIndex;
+        const key = delta < 0 ? 'Up' : 'Down';
+        await context.stage('resume-selection', async () => {
+          for (let step = 0; step < Math.abs(delta); step += 1) {
+            await this.tmux.sendKey(session.paneId, key, context.signal);
+          }
+          const pane = await this.tmux.inspect(session.paneId, context.signal);
+          if (!pane || pane.dead) throw await this.startupExitedError(session, pane);
+          await this.tmux.sendKey(session.paneId, 'Enter', context.signal);
+          this.pendingResumePickers.delete(sessionId);
+          const claimed = await this.waitForInitialAgentSessionClaim(restoringSession, pane.pid, context.signal);
+          if (!claimed.ok) throw daemonResultAppError(claimed);
+          if (restoringSession.agentSessionId) {
+            const persisted = await this.handleAgentSessionStarted({
+              sessionId,
+              agent: session.agent,
+              agentSessionId: restoringSession.agentSessionId,
+              cwd: session.cwd,
+              source: 'resume-picker',
+            });
+            if (!persisted.ok) throw daemonResultAppError(persisted);
+          }
+          await this.tmux.preserveOnExit(session.sessionName, false, context.signal);
+        });
+        return session;
+      },
+      async (_context, error) => this.cleanupStartTransaction(sessionId, session.sessionName, error),
+    );
+    if (!restored.ok) {
+      const failed = fail(restored.error);
+      if (restored.error.code === 'AGENT_SESSION_IN_USE') {
+        const ownerSessionId = typeof restored.error.context.ownerSessionId === 'string'
+          ? restored.error.context.ownerSessionId
           : undefined;
         const owner = ownerSessionId ? this.state.sessions?.[ownerSessionId] : undefined;
         if (owner) {
@@ -1034,19 +1164,18 @@ export class AssistantDaemon {
           };
         }
       }
-      return larkStartupError(claimed, request);
+      return larkStartupError(failed, request);
     }
-    await this.tmux.preserveOnExit(session.sessionName, false).catch(() => undefined);
     const selected = await this.useSession(sessionId);
     if (!selected.ok) return { type: 'error', content: remoteError(selected) };
     await this.rememberSessionWorkspace(session.cwd);
     return { type: 'session-created', content: remoteStartSuccess(session), session };
   }
 
-  private async readResumePicker(session: ManagedSession): Promise<ResumePickerView | undefined> {
-    const pane = await this.tmux.inspect(session.paneId);
+  private async readResumePicker(session: ManagedSession, signal?: AbortSignal): Promise<ResumePickerView | undefined> {
+    const pane = await this.tmux.inspect(session.paneId, signal);
     if (!pane || pane.dead) return undefined;
-    const raw = await this.tmux.capture(session.paneId, 120).catch(() => '');
+    const raw = await this.tmux.capture(session.paneId, 120, signal).catch(() => '');
     return parseResumePicker(raw, session.agent);
   }
 
@@ -1061,13 +1190,15 @@ export class AssistantDaemon {
     session: ManagedSession,
     previousFingerprint?: string,
     timeoutMs = 2_500,
+    signal?: AbortSignal,
   ): Promise<ResumePickerView | undefined> {
     const deadline = Date.now() + timeoutMs;
     let latest: ResumePickerView | undefined;
     while (Date.now() < deadline) {
-      latest = await this.readResumePicker(session);
+      if (signal?.aborted) throw signal.reason;
+      latest = await this.readResumePicker(session, signal);
       if (latest && (!previousFingerprint || latest.fingerprint !== previousFingerprint)) return latest;
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await abortableDelay(100, signal);
     }
     return latest;
   }
@@ -1429,7 +1560,7 @@ export class AssistantDaemon {
     return { ok: true, committed: false };
   }
 
-  private async stopSession(sessionId = this.state.activeSessionId): Promise<DaemonResult> {
+  private async stopSession(sessionId = this.state.activeSessionId, signal?: AbortSignal): Promise<DaemonResult> {
     if (!sessionId) {
       return fail(new AppError('SESSION_NOT_FOUND', 'no active managed session', { sessionId: 'default' }));
     }
@@ -1437,9 +1568,12 @@ export class AssistantDaemon {
     if (!session) {
       return fail(new AppError('SESSION_NOT_FOUND', `unknown session: ${sessionId}`, { sessionId }));
     }
-    if (await this.tmux.hasSession(session.sessionName)) {
-      await this.tmux.killSession(session.sessionName);
-    }
+    await this.tmux.killSession(session.sessionName, signal);
+    await this.forgetSessionState(sessionId);
+    return { ok: true };
+  }
+
+  private async forgetSessionState(sessionId: string): Promise<void> {
     const sessions = { ...this.state.sessions };
     delete sessions[sessionId];
     this.pendingResumePickers.delete(sessionId);
@@ -1468,7 +1602,6 @@ export class AssistantDaemon {
       this.unresolvedNotified.clear();
     }
     await this.store.saveState(this.state);
-    return { ok: true };
   }
 
   private async resetOwner(): Promise<DaemonResult> {
@@ -1692,36 +1825,82 @@ export class AssistantDaemon {
     }
   }
 
-  private async waitForInitialAgentSessionClaim(sessionId: string, panePid: number): Promise<DaemonResult> {
+  private async waitForInitialAgentSessionClaim(
+    session: ManagedSession,
+    panePid: number,
+    signal?: AbortSignal,
+  ): Promise<DaemonResult> {
     const deadline = Date.now() + 3_500;
     while (Date.now() < deadline) {
-      const session = this.state.sessions?.[sessionId];
-      if (!session) return { ok: false, error: `session disappeared during startup: ${sessionId}` };
       if (session.agentSessionId) return { ok: true };
-      const pane = await this.tmux.inspect(session.paneId);
+      const committedClaim = this.state.sessions?.[session.id]?.agentSessionId;
+      if (committedClaim) {
+        session.agentSessionId = committedClaim;
+        return { ok: true };
+      }
+      const pending = this.pendingAgentSessionClaims.get(session.id);
+      if (pending) {
+        const claimed = this.claimStartingAgentSession(session, pending);
+        if (!claimed.ok || session.agentSessionId) return claimed;
+      }
+      if (signal?.aborted) throw signal.reason;
+      const pane = await this.tmux.inspect(session.paneId, signal);
+      if (signal?.aborted) throw signal.reason;
       if (!pane || pane.dead) return fail(await this.startupExitedError(session, pane));
-      const agentSessionId = await resolveNativeAgentSessionId(session.agent, panePid).catch(() => undefined);
+      const agentSessionId = await resolveNativeAgentSessionId(
+        session.agent,
+        panePid,
+        undefined,
+        signal,
+      ).catch(() => undefined);
       if (agentSessionId) {
-        return this.handleAgentSessionStarted({
-          sessionId,
+        return this.claimStartingAgentSession(session, {
+          sessionId: session.id,
           agent: session.agent,
           agentSessionId,
           cwd: session.cwd,
           source: 'startup-discovery',
         });
       }
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await abortableDelay(100, signal);
     }
-    const session = this.state.sessions?.[sessionId];
-    if (!session) return fail(new AppError('SESSION_NOT_FOUND', `session disappeared during startup: ${sessionId}`, { sessionId }));
-    const pane = await this.tmux.inspect(session.paneId);
+    const pane = await this.tmux.inspect(session.paneId, signal);
+    if (signal?.aborted) throw signal.reason;
     if (!pane || pane.dead) return fail(await this.startupExitedError(session, pane));
-    if (session.agentSessionId || this.pendingAgentSessionClaims.has(sessionId)) return { ok: true };
+    const pending = this.pendingAgentSessionClaims.get(session.id);
+    if (pending) return this.claimStartingAgentSession(session, pending);
+    const committedClaim = this.state.sessions?.[session.id]?.agentSessionId;
+    if (committedClaim) {
+      session.agentSessionId = committedClaim;
+      return { ok: true };
+    }
+    if (session.agentSessionId) return { ok: true };
     return fail(new AppError(
       'AGENT_IDENTITY_TIMEOUT',
-      `unable to identify resumed native session: ${sessionId}`,
-      { sessionId, agent: session.agent },
+      `unable to identify resumed native session: ${session.id}`,
+      { sessionId: session.id, agent: session.agent },
     ));
+  }
+
+  private claimStartingAgentSession(
+    session: ManagedSession,
+    candidate: AgentSessionStartedCandidate,
+  ): DaemonResult {
+    if (candidate.agent !== session.agent) {
+      return fail(new AppError('START_FAILED', 'agent-session candidate does not match starting session', {
+        sessionId: session.id,
+        agent: session.agent,
+      }));
+    }
+    const owner = this.findAgentSessionOwner(candidate.agent, candidate.agentSessionId, session.id);
+    if (owner) {
+      this.pendingAgentSessionClaims.delete(session.id);
+      return fail(agentSessionInUse(session.id, owner.id));
+    }
+    session.agentSessionId = candidate.agentSessionId;
+    session.updatedAt = Date.now();
+    this.pendingAgentSessionClaims.delete(session.id);
+    return { ok: true };
   }
 
   private async startupExitedError(session: ManagedSession, pane?: { exitStatus?: number }): Promise<AppError> {
@@ -1740,12 +1919,18 @@ export class AssistantDaemon {
     );
   }
 
-  private async waitForStartupStability(session: ManagedSession, durationMs: number): Promise<DaemonResult> {
+  private async waitForStartupStability(
+    session: ManagedSession,
+    durationMs: number,
+    signal?: AbortSignal,
+  ): Promise<DaemonResult> {
     const deadline = Date.now() + durationMs;
     while (Date.now() < deadline) {
-      const pane = await this.tmux.inspect(session.paneId);
+      if (signal?.aborted) throw signal.reason;
+      const pane = await this.tmux.inspect(session.paneId, signal);
+      if (signal?.aborted) throw signal.reason;
       if (!pane || pane.dead) return fail(await this.startupExitedError(session, pane));
-      await new Promise((resolve) => setTimeout(resolve, 80));
+      await abortableDelay(80, signal);
     }
     return { ok: true };
   }
@@ -1848,9 +2033,9 @@ export class AssistantDaemon {
     return this.state.activeSessionId ? this.state.sessions?.[this.state.activeSessionId] : undefined;
   }
 
-  private async reconcileSessions(discover = false): Promise<ManagedSession[]> {
+  private async reconcileSessions(discover = false, signal?: AbortSignal): Promise<ManagedSession[]> {
     const previousActive = this.state.activeSessionId;
-    const result = await this.reconciler.reconcile(this.state, discover);
+    const result = await this.reconciler.reconcile(this.state, discover, signal);
     if (!result.changed) return result.liveSessions;
     const activeChanged = result.state.activeSessionId !== previousActive;
     if (result.removedActive) {
@@ -1917,7 +2102,7 @@ export class AssistantDaemon {
     await this.log(
       `remote session create requested: session=${request.sessionId} agent=${request.agent} resume=${request.resume?.mode ?? 'new'}`,
     );
-    const started = await this.startSession(request.sessionId, request.cwd, request.agent, request.resume);
+    const started = await this.startSession(request.sessionId, request.cwd, request.agent, request.resume, 'lark');
     if (!started.ok) {
       await this.log(`remote session create failed: session=${request.sessionId} code=${started.errorCode ?? 'UNKNOWN'}`);
       if (started.errorCode === 'AGENT_SESSION_IN_USE') {
@@ -1939,7 +2124,7 @@ export class AssistantDaemon {
     }
     const session = selected.value as ManagedSession;
     if (request.resume?.mode === 'picker') {
-      const picker = await this.waitForResumePicker(session);
+      const picker = (started.value as { resumePicker?: ResumePickerView }).resumePicker;
       if (picker) {
         this.pendingResumePickers.set(session.id, request);
         return { ok: true, state: 'picker', session, picker };
@@ -2030,6 +2215,30 @@ export class AssistantDaemon {
 
 function fail(error: unknown): DaemonResult {
   return { ok: false, ...serializeAppError(error) };
+}
+
+function daemonResultAppError(result: Extract<DaemonResult, { ok: false }>): AppError {
+  return new AppError(
+    result.errorCode ?? 'START_FAILED',
+    result.error,
+    result.errorContext ?? {},
+  );
+}
+
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', aborted);
+      resolve();
+    }, ms);
+    const aborted = (): void => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    signal.addEventListener('abort', aborted, { once: true });
+  });
 }
 
 function agentSessionInUse(sessionId: string, ownerSessionId: string): AppError {
@@ -2123,6 +2332,17 @@ function remoteError(result: DaemonResult): string {
     case 'SESSION_EXISTS': return context.source === 'tmux'
       ? `无法启动 session「${sessionId}」：检测到同名 tmux 会话，但它未登记为可连接的 LCA session。请换一个名称，或在本机检查 tmux 会话。`
       : `无法启动 session「${sessionId}」：该 session 已在运行。请换一个名称，或用 /sessions 连接现有 session。`;
+    case 'SESSION_STARTING':
+      return `session「${sessionId}」正在启动，请等待当前操作完成后再试。`;
+    case 'SESSION_START_TIMEOUT': {
+      const agent = typeof context.agent === 'string' ? context.agent : 'Agent';
+      const cwd = typeof context.cwd === 'string' ? context.cwd : '未知目录';
+      const stage = typeof context.stage === 'string' ? context.stage : 'unknown';
+      const excerpt = typeof context.terminalExcerpt === 'string' && context.terminalExcerpt.trim()
+        ? `\n\n最近终端输出：\n${context.terminalExcerpt}`
+        : '';
+      return `无法启动 session「${sessionId}」：${agent} 启动超过 30 秒，已取消并清理。\n\n工作目录：${cwd}\n超时阶段：${stage}${excerpt}`;
+    }
     case 'AGENT_SESSION_IN_USE': {
       const ownerSessionId = typeof context.ownerSessionId === 'string' ? context.ownerSessionId : '现有 session';
       return `无法启动 session「${sessionId}」：该 Agent 原生 session 已由 LCA session「${ownerSessionId}」连接。请用 /sessions 连接现有 session。`;

@@ -31,7 +31,7 @@ export class TmuxController {
         { sessionId: options.sessionName },
       );
     }
-    if (await this.hasSession(options.sessionName)) {
+    if (await this.hasSession(options.sessionName, options.signal)) {
       throw new AppError(
         'SESSION_EXISTS',
         `tmux session already exists: ${options.sessionName}`,
@@ -54,39 +54,39 @@ export class TmuxController {
     if (options.preserveOnExit) {
       createArgs.push(';', 'set-option', '-w', '-t', `=${options.sessionName}:`, 'remain-on-exit', 'on');
     }
-    await runFile(this.binary, createArgs);
-    const pane = await this.findBySession(options.sessionName);
+    await runFile(this.binary, createArgs, { signal: options.signal });
+    const pane = await this.findBySession(options.sessionName, options.signal);
     if (!pane) throw new Error('tmux created a session without a discoverable pane');
     return pane;
   }
 
-  async hasSession(sessionName: string): Promise<boolean> {
+  async hasSession(sessionName: string, signal?: AbortSignal): Promise<boolean> {
     try {
-      await runFile(this.binary, ['has-session', '-t', `=${sessionName}`]);
+      await runFile(this.binary, ['has-session', '-t', `=${sessionName}`], { signal });
       return true;
     } catch {
       return false;
     }
   }
 
-  async findBySession(sessionName: string): Promise<TmuxPane | undefined> {
+  async findBySession(sessionName: string, signal?: AbortSignal): Promise<TmuxPane | undefined> {
     const { stdout } = await runFile(this.binary, [
       'list-panes', '-t', `=${sessionName}`, '-F', PANE_FORMAT,
-    ]);
+    ], { signal });
     return stdout.split('\n').map(parsePane).find(Boolean);
   }
 
-  async inspect(paneId: string): Promise<TmuxPane | undefined> {
-    const result = await this.inspectStatus(paneId);
+  async inspect(paneId: string, signal?: AbortSignal): Promise<TmuxPane | undefined> {
+    const result = await this.inspectStatus(paneId, signal);
     return result.status === 'live' || result.status === 'dead' ? result.pane : undefined;
   }
 
-  async inspectStatus(paneId: string): Promise<TmuxInspectResult> {
+  async inspectStatus(paneId: string, signal?: AbortSignal): Promise<TmuxInspectResult> {
     assertSafeTmuxTarget(paneId);
     try {
       const { stdout } = await runFile(this.binary, [
         'display-message', '-p', '-t', paneId, PANE_FORMAT,
-      ]);
+      ], { signal });
       if (!stdout.trim()) return { status: 'missing' };
       const pane = parsePane(stdout.trim());
       if (!pane) return { status: 'unavailable', error: new Error('invalid tmux pane response') };
@@ -96,9 +96,9 @@ export class TmuxController {
     }
   }
 
-  async inspectSession(sessionName: string): Promise<TmuxInspectResult> {
+  async inspectSession(sessionName: string, signal?: AbortSignal): Promise<TmuxInspectResult> {
     try {
-      const pane = await this.findBySession(sessionName);
+      const pane = await this.findBySession(sessionName, signal);
       if (!pane) return { status: 'missing' };
       return pane.dead ? { status: 'dead', pane } : { status: 'live', pane };
     } catch (error) {
@@ -106,14 +106,14 @@ export class TmuxController {
     }
   }
 
-  async listSessions(prefix: string): Promise<TmuxPane[]> {
-    const { stdout } = await runFile(this.binary, ['list-panes', '-a', '-F', PANE_FORMAT]);
+  async listSessions(prefix: string, signal?: AbortSignal): Promise<TmuxPane[]> {
+    const { stdout } = await runFile(this.binary, ['list-panes', '-a', '-F', PANE_FORMAT], { signal });
     return stdout.split('\n')
       .map(parsePane)
       .filter((pane): pane is TmuxPane => Boolean(pane?.sessionName.startsWith(prefix)));
   }
 
-  async writeMetadata(sessionName: string, metadata: TmuxSessionMetadata): Promise<void> {
+  async writeMetadata(sessionName: string, metadata: TmuxSessionMetadata, signal?: AbortSignal): Promise<void> {
     const values: Partial<Record<keyof typeof METADATA_OPTIONS, string>> = {
       managed: '1',
       sessionId: metadata.sessionId,
@@ -125,17 +125,17 @@ export class TmuxController {
     for (const [key, option] of Object.entries(METADATA_OPTIONS) as [keyof typeof METADATA_OPTIONS, string][]) {
       const value = values[key];
       if (value === undefined) {
-        await runFile(this.binary, ['set-option', '-u', '-t', sessionName, option]).catch(() => undefined);
+        await runFile(this.binary, ['set-option', '-u', '-t', sessionName, option], { signal }).catch(() => undefined);
       } else {
-        await runFile(this.binary, ['set-option', '-t', sessionName, option, value]);
+        await runFile(this.binary, ['set-option', '-t', sessionName, option, value], { signal });
       }
     }
   }
 
-  async readMetadata(sessionName: string): Promise<TmuxSessionMetadata | undefined> {
+  async readMetadata(sessionName: string, signal?: AbortSignal): Promise<TmuxSessionMetadata | undefined> {
     const values: Partial<Record<keyof typeof METADATA_OPTIONS, string>> = {};
     for (const [key, option] of Object.entries(METADATA_OPTIONS) as [keyof typeof METADATA_OPTIONS, string][]) {
-      const result = await runFile(this.binary, ['show-options', '-t', sessionName, '-v', option]).catch(() => undefined);
+      const result = await runFile(this.binary, ['show-options', '-t', sessionName, '-v', option], { signal }).catch(() => undefined);
       if (!result) {
         if (key === 'agentSessionId') continue;
         return undefined;
@@ -154,18 +154,18 @@ export class TmuxController {
     };
   }
 
-  async capture(paneId: string, lines = 200): Promise<string> {
+  async capture(paneId: string, lines = 200, signal?: AbortSignal): Promise<string> {
     assertSafeTmuxTarget(paneId);
     const { stdout } = await runFile(this.binary, [
       'capture-pane', '-p', '-J', '-e', '-t', paneId, '-S', `-${Math.max(1, lines)}`,
-    ]);
+    ], { signal });
     return stdout;
   }
 
-  async preserveOnExit(sessionName: string, enabled: boolean): Promise<void> {
+  async preserveOnExit(sessionName: string, enabled: boolean, signal?: AbortSignal): Promise<void> {
     await runFile(this.binary, [
       'set-option', '-w', '-t', `=${sessionName}:`, 'remain-on-exit', enabled ? 'on' : 'off',
-    ]);
+    ], { signal });
   }
 
   sendText(paneId: string, input: string, submit = true): Promise<void> {
@@ -186,17 +186,17 @@ export class TmuxController {
     return this.writes;
   }
 
-  async sendKey(paneId: string, key: string): Promise<void> {
+  async sendKey(paneId: string, key: string, signal?: AbortSignal): Promise<void> {
     assertSafeTmuxTarget(paneId);
     if (!/^(Enter|Escape|Space|Tab|BSpace|Up|Down|Left|Right|PPage|NPage|C-c|C-u|C-k|C-Enter|[yandpcq1-9])$/.test(key)) {
       throw new Error(`unsupported tmux key: ${key}`);
     }
-    await runFile(this.binary, ['send-keys', '-t', paneId, key]);
+    await runFile(this.binary, ['send-keys', '-t', paneId, key], { signal });
   }
 
-  async killSession(sessionName: string): Promise<void> {
+  async killSession(sessionName: string, signal?: AbortSignal): Promise<void> {
     try {
-      await runFile(this.binary, ['kill-session', '-t', `=${sessionName}`]);
+      await runFile(this.binary, ['kill-session', '-t', `=${sessionName}`], { signal });
     } catch (error) {
       if (!tmuxTargetMissing(error)) throw error;
     }

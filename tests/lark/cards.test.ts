@@ -474,6 +474,20 @@ esc to interrupt`);
     expect(serialized).not.toContain('column');
   });
 
+  it('renders an actionable timeout card with absolute cwd and cleanup result', () => {
+    const card = sessionStartupFailureCard('oc_1', {
+      sessionId: 'helix', agent: 'traex', reason: 'timeout', cwd: '/Users/feng/workspace/helix',
+      stage: 'agent-version', elapsedMs: 30_012, terminalExcerpt: 'checking for updates…',
+    }, signer) as InteractiveCard;
+    const serialized = JSON.stringify(card);
+    expect(serialized).toContain('/Users/feng/workspace/helix');
+    expect(serialized).toContain('启动超过 30 秒，已取消并清理');
+    expect(serialized).toContain('agent-version');
+    expect(serialized).toContain('checking for updates');
+    expect(serialized).toContain('新建 Session');
+    expect(serialized).toContain('查看 Sessions');
+  });
+
   it('renders recovery actions for validation and other non-process startup failures', () => {
     const card = sessionCreateFailureCard('oc_1', '工作目录不可用。', signer) as InteractiveCard;
     const serialized = JSON.stringify(card);
