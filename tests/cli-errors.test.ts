@@ -21,6 +21,8 @@ describe('CLI error formatting', () => {
 
   it.each([
     ['SESSION_NOT_FOUND', { sessionId: 'api' }, '找不到 session「api」'],
+    ['SESSION_STARTING', { sessionId: 'api' }, 'session「api」正在启动'],
+    ['SESSION_START_TIMEOUT', { sessionId: 'api', agent: 'traex', cwd: '/work/api', stage: 'agent-version' }, '启动超过 30 秒，已取消并清理'],
     ['INVALID_SESSION_NAME', { sessionId: 'bad name' }, 'session 名称「bad name」无效'],
     ['NOT_INITIALIZED', {}, 'lark-coding-assistant init'],
     ['INVALID_CWD', { cwd: '/missing' }, '工作目录不可用：/missing'],

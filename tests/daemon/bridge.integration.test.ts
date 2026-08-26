@@ -72,14 +72,16 @@ rl.on('line', (line) => {
       fake.handler = handler;
       return fake;
     };
+    const daemonSessionName = `lca-daemon-test-${process.pid}-${Date.now()}`;
     const daemon = new AssistantDaemon(
       store,
       paths,
       factory,
-      `lca-daemon-test-${process.pid}-${Date.now()}`,
+      daemonSessionName,
       undefined,
       150,
       'test-version',
+      3_000,
     );
     await daemon.start();
     const ping = await requestDaemon(paths.socket, { method: 'ping' });
@@ -99,7 +101,7 @@ rl.on('line', (line) => {
     const duplicateStart = await requestDaemon(paths.socket, {
       method: 'start', cwd: root, sessionId: 'default', agent: 'codex',
     });
-    expect(duplicateStart).toEqual({
+    expect(duplicateStart).toMatchObject({
       ok: false,
       error: 'managed coding-agent session is already running: default',
       errorCode: 'SESSION_EXISTS',
@@ -118,6 +120,24 @@ rl.on('line', (line) => {
     expect((instantFailure as { errorContext?: { terminalExcerpt?: string } }).errorContext?.terminalExcerpt)
       .toContain('failed to acquire thread writer lock');
     expect((await store.loadState()).sessions?.['instant-fail']).toBeUndefined();
+
+    const timedOut = await requestDaemon(paths.socket, {
+      method: 'start', cwd: root, sessionId: 'timeout', agent: 'traex', resume: { mode: 'last' },
+    }, 5_000);
+    expect(timedOut).toMatchObject({
+      ok: false,
+      errorCode: 'SESSION_START_TIMEOUT',
+      errorContext: {
+        sessionId: 'timeout', agent: 'traex', cwd: root, stage: 'agent-identity', timeoutMs: 3_000,
+      },
+    });
+    expect((await store.loadState()).sessions?.timeout).toBeUndefined();
+    expect(await runFile('tmux', ['has-session', '-t', `=${daemonSessionName}-timeout`]).then(() => true, () => false)).toBe(false);
+    const timeoutRetry = await requestDaemon(paths.socket, {
+      method: 'start', cwd: root, sessionId: 'timeout', agent: 'traex',
+    });
+    expect(timeoutRetry.ok).toBe(true);
+    await requestDaemon(paths.socket, { method: 'stop', sessionId: 'timeout' });
 
     await fake.emit(message('hello from lark'));
     expect(fake.processingMessages.map(({ content }) => content)).toContain('hello from lark');
@@ -170,7 +190,9 @@ rl.on('line', (line) => {
     const secondStart = requestDaemon(paths.socket, {
       method: 'start', cwd: root, sessionId: 'second', agent: 'traex', resume: { mode: 'last' },
     });
-    await waitFor(async () => Boolean((await store.loadState()).sessions?.second));
+    await waitFor(() => runFile('tmux', ['has-session', '-t', `=${daemonSessionName}-second`])
+      .then(() => true, () => false));
+    expect((await store.loadState()).sessions?.second).toBeUndefined();
     await requestDaemon(paths.socket, {
       method: 'agentSessionStarted',
       candidate: { sessionId: 'second', agent: 'traex', agentSessionId: 'thread-second', cwd: root, source: 'resume' },
@@ -372,7 +394,7 @@ rl.on('line', (line) => {
       return state.sessions?.default === undefined && state.activeSessionId === undefined;
     });
     await waitFor(async () => fake.texts.some(({ text }) => text.includes('codex/tmux pane 已退出')));
-  }, 30_000);
+  }, 45_000);
 });
 
 class FakeGateway implements RemoteGateway {

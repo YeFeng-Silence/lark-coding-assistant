@@ -161,9 +161,10 @@ async function runStart(options: StartOptions): Promise<void> {
   await ensureInitialized();
   await preflight(options.agent);
   await ensureDaemon();
+  console.log(`正在启动 ${options.agent} session「${options.name}」…`);
   const value = await daemonValue<StartSessionValue>({
     method: 'start', ...request,
-  });
+  }, 35_000);
   if (value.binding.mode === 'reused') {
     console.log('\n已自动沿用原有飞书/Lark 私聊绑定。\n');
   } else if (value.binding.mode === 'awaiting-owner-message') {
@@ -391,8 +392,8 @@ function daemonEntryPath(): string {
   return fileURLToPath(new URL('./daemon-entry.js', import.meta.url));
 }
 
-async function daemonValue<T = unknown>(request: DaemonRequestInput): Promise<T> {
-  const response = await requestDaemon(paths.socket, request);
+async function daemonValue<T = unknown>(request: DaemonRequestInput, timeoutMs?: number): Promise<T> {
+  const response = await requestDaemon(paths.socket, request, timeoutMs);
   if (!response.ok) throw daemonResultError(response);
   return response.value as T;
 }

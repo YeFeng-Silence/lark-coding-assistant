@@ -27,6 +27,28 @@ function formatKnownError(error: AppError, context: ErrorContext): string[] {
         `  lark-coding-assistant attach ${sessionId}`,
         '  lark-coding-assistant start --name <新名称>',
       ];
+    case 'SESSION_STARTING':
+      return [
+        `session「${sessionId}」正在启动，请等待当前操作完成。`,
+        '',
+        '稍后可查看状态：',
+        `  lark-coding-assistant status ${sessionId}`,
+      ];
+    case 'SESSION_START_TIMEOUT': {
+      const excerpt = safeValue(context.terminalExcerpt, 'Agent 未输出可用错误信息。');
+      return [
+        `session「${sessionId}」启动超过 30 秒，已取消并清理。`,
+        '',
+        `Agent：${safeValue(context.agent, '未知')}`,
+        `工作目录：${safeValue(context.cwd, '未知')}`,
+        `超时阶段：${safeValue(context.stage, 'unknown')}`,
+        '',
+        '最近终端输出：',
+        excerpt,
+        '',
+        '可以直接使用同名 session 重试。',
+      ];
+    }
     case 'AGENT_SESSION_IN_USE': {
       const ownerSessionId = safeValue(context.ownerSessionId, '现有 session');
       return [

@@ -33,4 +33,5 @@ export interface TmuxCreateOptions {
   args?: readonly string[];
   env?: Readonly<Record<string, string>>;
   preserveOnExit?: boolean;
+  signal?: AbortSignal;
 }

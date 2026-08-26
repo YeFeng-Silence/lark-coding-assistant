@@ -8,7 +8,7 @@ export interface CommandResult {
 export function runFile(
   file: string,
   args: readonly string[],
-  options: { cwd?: string; timeoutMs?: number } = {},
+  options: { cwd?: string; timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<CommandResult> {
   return new Promise((resolve, reject) => {
     execFile(
@@ -17,6 +17,7 @@ export function runFile(
       {
         cwd: options.cwd,
         timeout: options.timeoutMs ?? 10_000,
+        signal: options.signal,
         encoding: 'utf8',
         maxBuffer: 4 * 1024 * 1024,
       },

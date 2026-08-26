@@ -108,6 +108,8 @@ lca start --name docs --agent claude --cwd ~/workspace/docs
 
 名称只允许字母、数字、下划线和短横线，最长 40 个字符。不指定名称时使用 `default`。
 
+Session 创建和恢复采用 30 秒启动事务。本地与飞书都会等到 agent 可用后再报告成功；超过 30 秒会取消底层启动、清理临时 tmux 和状态，并返回包含失败阶段与最近终端输出的提示，不会继续在后台运行。同名 session 正在启动时会直接提示“正在启动”，不同名称可以并行启动。Resume Picker 等待用户选择不计入 30 秒，提交选择后重新开始一次 30 秒恢复事务。该限制只作用于启动链路，不影响消息、审批、Question、`status`、`tail`、`attach`、`stop` 或 daemon 管理。
+
 一个 PersonalAgent 私聊同一时刻只连接一个 active session。在飞书发送：
 
 ```text

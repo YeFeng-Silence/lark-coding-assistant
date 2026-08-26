@@ -531,6 +531,23 @@ export function sessionStartupFailureCard(
   failure: SessionStartupFailure,
   signer: ActionSigner,
 ): object {
+  if (failure.reason === 'timeout') {
+    const details = [
+      `⚠️ **Session**  \`${escapeInlineCode(failure.sessionId)}\``,
+      `**Agent**  ${escapeMarkdown(getAgentAdapter(failure.agent).displayName)}`,
+      `**工作目录**  \`${escapeInlineCode(failure.cwd ?? '未知')}\``,
+      `**结果**  启动超过 30 秒，已取消并清理`,
+      `**超时阶段**  \`${escapeInlineCode(failure.stage ?? 'unknown')}\``,
+    ].join('\n');
+    const output = failure.terminalExcerpt.trim()
+      ? [{ tag: 'markdown', content: `**最近终端输出**\n\n\`\`\`text\n${escapeFence(failure.terminalExcerpt)}\n\`\`\`` }]
+      : [];
+    return cardElements('Session 启动失败', [
+      { tag: 'markdown', content: details },
+      ...output,
+      ...sessionFailureActions(chatId, failure.sessionId, failure.agent, signer),
+    ], 'red');
+  }
   const exitStatus = failure.exitStatus === undefined ? '未知' : String(failure.exitStatus);
   return cardElements('Session 启动失败', [
     {

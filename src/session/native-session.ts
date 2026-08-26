@@ -10,17 +10,18 @@ export async function resolveNativeAgentSessionId(
   agent: AgentId,
   pid: number,
   home = homedir(),
+  signal?: AbortSignal,
 ): Promise<string | undefined> {
   if (!Number.isInteger(pid) || pid <= 0) return undefined;
   if (agent === 'traex') {
     const peer = await resolveTraexPeer(pid, home);
     if (peer) return peer;
     return matchPath(
-      await processOpenFiles(pid),
+      await processOpenFiles(pid, signal),
       new RegExp(`/\\.trae/cli/sessions/.+/rollout-[^/]+-(${UUID})\\.jsonl(?:\\.lock)?$`),
     );
   }
-  const openFiles = await processOpenFiles(pid);
+  const openFiles = await processOpenFiles(pid, signal);
   if (agent === 'codex') return matchPath(openFiles, new RegExp(`/\\.codex/thread-writer-locks/(${UUID})\\.lock$`));
   return matchPath(openFiles, new RegExp(`/\\.claude/projects/[^/]+/(${UUID})\\.jsonl$`));
 }
@@ -38,8 +39,8 @@ async function resolveTraexPeer(pid: number, home: string): Promise<string | und
   return undefined;
 }
 
-async function processOpenFiles(pid: number): Promise<string[]> {
-  const result = await runFile('lsof', ['-Fn', '-p', String(pid)], { timeoutMs: 3_000 }).catch(() => undefined);
+async function processOpenFiles(pid: number, signal?: AbortSignal): Promise<string[]> {
+  const result = await runFile('lsof', ['-Fn', '-p', String(pid)], { timeoutMs: 3_000, signal }).catch(() => undefined);
   if (!result) return [];
   return result.stdout.split('\n').filter((line) => line.startsWith('n')).map((line) => line.slice(1));
 }
