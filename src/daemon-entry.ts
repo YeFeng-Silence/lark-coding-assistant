@@ -2,6 +2,7 @@ import { AssistantDaemon } from './daemon/server.js';
 import { resolveAppPaths } from './core/paths.js';
 import { AppStore } from './core/store.js';
 import { readFile } from 'node:fs/promises';
+import { isRecoverableTransportError } from './daemon/transport-errors.js';
 
 const paths = resolveAppPaths();
 const packageInfo = JSON.parse(
@@ -25,11 +26,19 @@ try {
 }
 
 process.on('uncaughtException', (error) => {
+  if (isRecoverableTransportError(error)) {
+    console.error(`${new Date().toISOString()} daemon recoverable transport exception; keeping daemon alive`, error);
+    return;
+  }
   console.error(`${new Date().toISOString()} daemon uncaught exception`, error);
   process.exit(1);
 });
 
 process.on('unhandledRejection', (error) => {
+  if (isRecoverableTransportError(error)) {
+    console.error(`${new Date().toISOString()} daemon recoverable transport rejection; keeping daemon alive`, error);
+    return;
+  }
   console.error(`${new Date().toISOString()} daemon unhandled rejection`, error);
   process.exit(1);
 });
