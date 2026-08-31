@@ -19,6 +19,16 @@ describe('CLI error formatting', () => {
     expect(output).not.toContain('at ');
   });
 
+  it('renders the native session id for an asynchronous ownership conflict', () => {
+    const output = formatCliError(new AppError(
+      'AGENT_SESSION_IN_USE',
+      'agent session is already managed by owner',
+      { sessionId: 'duplicate', ownerSessionId: 'owner', agentSessionId: 'native-thread-123' },
+    ));
+    expect(output).toContain('原生 session ID：native-thread-123');
+    expect(output).toContain('lark-coding-assistant attach owner');
+  });
+
   it.each([
     ['SESSION_NOT_FOUND', { sessionId: 'api' }, '找不到 session「api」'],
     ['SESSION_STARTING', { sessionId: 'api' }, 'session「api」正在启动'],

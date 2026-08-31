@@ -9,7 +9,7 @@ import { registerApp } from '@larksuite/channel';
 import qrcode from 'qrcode-terminal';
 import { resolveAppPaths } from './core/paths.js';
 import { AppStore } from './core/store.js';
-import type { AppConfig, Tenant } from './core/model.js';
+import type { AppConfig, SessionExitEvent, Tenant } from './core/model.js';
 import { runFile } from './platform/process.js';
 import { requestDaemon } from './daemon/client.js';
 import { resolveResumeOption } from './agents/resume.js';
@@ -225,7 +225,11 @@ async function attachLocal(name: string): Promise<void> {
   const state = await store.loadState();
   const config = await store.loadConfig();
   const session = state.sessions?.[name];
-  if (!session) throw new AppError('SESSION_NOT_FOUND', `no managed session: ${name}`, { sessionId: name });
+  if (!session) {
+    const exitEvent = state.recentSessionExits?.[name];
+    if (exitEvent?.reason === 'agent-session-conflict') throw sessionConflictError(exitEvent);
+    throw new AppError('SESSION_NOT_FOUND', `no managed session: ${name}`, { sessionId: name });
+  }
   if (!config) throw new AppError('NOT_INITIALIZED', 'not initialized');
   try {
     await runFile(config.tmuxBinary, ['has-session', '-t', `=${session.sessionName}`]);
@@ -235,10 +239,13 @@ async function attachLocal(name: string): Promise<void> {
         binary: config.tmuxBinary,
       }, { cause: error });
     }
+    const exitEvent = (await store.loadState()).recentSessionExits?.[name];
+    if (exitEvent?.reason === 'agent-session-conflict') throw sessionConflictError(exitEvent);
     throw new AppError('SESSION_NOT_FOUND', `managed session is no longer running: ${name}`, {
       sessionId: name,
     }, { cause: error });
   }
+  const attachedAt = Date.now();
   const child = spawn(config.tmuxBinary, ['attach-session', '-t', `=${session.sessionName}`], { stdio: 'inherit' });
   const code = await new Promise<number | null>((resolveExit, reject) => {
     child.once('error', (error) => {
@@ -252,7 +259,24 @@ async function attachLocal(name: string): Promise<void> {
     });
     child.once('exit', resolveExit);
   });
+  const exitEvent = (await store.loadState()).recentSessionExits?.[name];
+  if (exitEvent?.reason === 'agent-session-conflict' && exitEvent.occurredAt >= attachedAt) {
+    throw sessionConflictError(exitEvent);
+  }
   if (code && code !== 0) process.exitCode = code;
+}
+
+function sessionConflictError(event: SessionExitEvent): AppError {
+  return new AppError(
+    'AGENT_SESSION_IN_USE',
+    `agent session is already managed by ${event.ownerSessionId}`,
+    {
+      sessionId: event.sessionId,
+      agent: event.agent,
+      agentSessionId: event.agentSessionId,
+      ownerSessionId: event.ownerSessionId,
+    },
+  );
 }
 
 async function runStatus(name?: string): Promise<void> {

@@ -32,6 +32,15 @@ export interface ManagedSession {
   updatedAt: number;
 }
 
+export interface SessionExitEvent {
+  sessionId: string;
+  agent: AgentId;
+  reason: 'agent-session-conflict';
+  agentSessionId: string;
+  ownerSessionId: string;
+  occurredAt: number;
+}
+
 export interface SessionState {
   schemaVersion: 2;
   ownerOpenId?: string;
@@ -39,6 +48,7 @@ export interface SessionState {
   autoBindDisabled?: boolean;
   activeSessionId?: string;
   sessions?: Record<string, ManagedSession>;
+  recentSessionExits?: Record<string, SessionExitEvent>;
   recentWorkspaces?: RecentWorkspace[];
   bindCodeHash?: string;
   bindCodeExpiresAt?: number;

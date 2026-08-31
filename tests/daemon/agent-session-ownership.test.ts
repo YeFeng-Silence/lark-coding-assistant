@@ -32,6 +32,9 @@ describe('native agent session ownership', () => {
     expect(killed).toEqual(['lca-duplicate']);
     expect(internal.state.sessions?.owner?.agentSessionId).toBe('native-thread');
     expect(internal.state.sessions?.duplicate).toBeUndefined();
+    expect(internal.state.recentSessionExits?.duplicate).toMatchObject({
+      reason: 'agent-session-conflict', agentSessionId: 'native-thread', ownerSessionId: 'owner',
+    });
     expect(messages.at(-1)).toContain('已由 LCA session「owner」连接');
   });
 });
