@@ -51,8 +51,12 @@ function formatKnownError(error: AppError, context: ErrorContext): string[] {
     }
     case 'AGENT_SESSION_IN_USE': {
       const ownerSessionId = safeValue(context.ownerSessionId, '现有 session');
+      const agentSessionId = typeof context.agentSessionId === 'string'
+        ? safeValue(context.agentSessionId, '')
+        : undefined;
       return [
         `无法启动 session「${sessionId}」：对应的 Agent 原生 session 已由「${ownerSessionId}」连接。`,
+        ...(agentSessionId ? ['', `原生 session ID：${agentSessionId}`] : []),
         '',
         '请直接连接现有 session：',
         `  lark-coding-assistant attach ${ownerSessionId}`,

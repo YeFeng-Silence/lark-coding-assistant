@@ -5,7 +5,7 @@ import { runFile } from '../platform/process.js';
 import type { ScreenDetection } from '../screen/detector.js';
 import { tailScreen } from '../screen/normalize.js';
 import { AppStore, createBindCode, hashBindCode } from '../core/store.js';
-import type { AppConfig, ManagedSession, SessionState } from '../core/model.js';
+import type { AppConfig, ManagedSession, SessionExitEvent, SessionState } from '../core/model.js';
 import type { AppPaths } from '../core/paths.js';
 import { AppError, isAppError, serializeAppError, systemErrorCode } from '../core/errors.js';
 import { validateStartSessionRequest, type StartSessionRequest } from '../session/start-request.js';
@@ -397,6 +397,7 @@ export class AssistantDaemon {
         agentSessionId: session.agentSessionId,
       }, context.signal));
       await context.stage('state', () => this.commitStartedSession(session, binding));
+      await this.clearSessionExitEvent(sessionId, context.startedAt);
     } catch (error) {
       return fail(isAppError(error)
         ? error
@@ -1617,6 +1618,31 @@ export class AssistantDaemon {
     await this.store.saveState(this.state);
   }
 
+  private async clearSessionExitEvent(sessionId: string, before: number): Promise<void> {
+    const event = this.state.recentSessionExits?.[sessionId];
+    if (!event || event.occurredAt >= before) return;
+    const recentSessionExits = { ...this.state.recentSessionExits };
+    delete recentSessionExits[sessionId];
+    this.state = { ...this.state, recentSessionExits, updatedAt: Date.now() };
+    await this.store.saveState(this.state);
+  }
+
+  private async rememberSessionExitEvent(event: SessionExitEvent): Promise<void> {
+    const cutoff = Date.now() - 24 * 60 * 60 * 1_000;
+    const recentSessionExits = Object.fromEntries(Object.entries(this.state.recentSessionExits ?? {})
+      .filter(([, value]) => value.occurredAt >= cutoff));
+    recentSessionExits[event.sessionId] = event;
+    const retained = Object.entries(recentSessionExits)
+      .sort(([, left], [, right]) => right.occurredAt - left.occurredAt)
+      .slice(0, 20);
+    this.state = {
+      ...this.state,
+      recentSessionExits: Object.fromEntries(retained),
+      updatedAt: Date.now(),
+    };
+    await this.store.saveState(this.state);
+  }
+
   private async resetOwner(): Promise<DaemonResult> {
     this.pendingMessages.length = 0;
     this.pendingInteractionInput = undefined;
@@ -1789,7 +1815,7 @@ export class AssistantDaemon {
         `agent session conflict: session=${candidate.sessionId} agent=${candidate.agent} agentSession=${candidate.agentSessionId} owner=${owner.id}`,
       );
       setTimeout(() => void this.rejectDuplicateAgentSession(candidate, owner), 100);
-      return fail(agentSessionInUse(candidate.sessionId, owner.id));
+      return fail(agentSessionInUse(candidate.sessionId, owner.id, candidate.agentSessionId));
     }
     if (!session) {
       this.pendingAgentSessionClaims.set(candidate.sessionId, candidate);
@@ -1908,7 +1934,7 @@ export class AssistantDaemon {
     const owner = this.findAgentSessionOwner(candidate.agent, candidate.agentSessionId, session.id);
     if (owner) {
       this.pendingAgentSessionClaims.delete(session.id);
-      return fail(agentSessionInUse(session.id, owner.id));
+      return fail(agentSessionInUse(session.id, owner.id, candidate.agentSessionId));
     }
     session.agentSessionId = candidate.agentSessionId;
     session.updatedAt = Date.now();
@@ -1971,6 +1997,14 @@ export class AssistantDaemon {
     candidate: AgentSessionStartedCandidate,
     owner: Pick<ManagedSession, 'id'>,
   ): Promise<void> {
+    await this.rememberSessionExitEvent({
+      sessionId: candidate.sessionId,
+      agent: candidate.agent,
+      reason: 'agent-session-conflict',
+      agentSessionId: candidate.agentSessionId,
+      ownerSessionId: owner.id,
+      occurredAt: Date.now(),
+    });
     const duplicate = this.state.sessions?.[candidate.sessionId];
     if (duplicate) await this.stopSession(duplicate.id).catch((error) => this.log(
       `failed to stop duplicate agent session ${duplicate.id}: ${errorMessage(error)}`,
@@ -1983,7 +2017,7 @@ export class AssistantDaemon {
     if (this.state.boundChatId) {
       await this.gateway?.sendText(
         this.state.boundChatId,
-        `${candidate.agent} 原生 session 已由 LCA session「${owner.id}」连接；已停止重复创建的「${candidate.sessionId}」。请用 /sessions 连接「${owner.id}」。`,
+        `${candidate.agent} 原生 session「${candidate.agentSessionId}」已由 LCA session「${owner.id}」连接；已停止重复创建的「${candidate.sessionId}」。请用 /sessions 连接「${owner.id}」。`,
       ).catch((error) => this.log(`agent session conflict notification failed: ${errorMessage(error)}`));
     }
   }
@@ -2254,11 +2288,11 @@ function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-function agentSessionInUse(sessionId: string, ownerSessionId: string): AppError {
+function agentSessionInUse(sessionId: string, ownerSessionId: string, agentSessionId?: string): AppError {
   return new AppError(
     'AGENT_SESSION_IN_USE',
     `agent session is already managed by ${ownerSessionId}`,
-    { sessionId, ownerSessionId },
+    { sessionId, ownerSessionId, agentSessionId },
   );
 }
 
