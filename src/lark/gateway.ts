@@ -103,7 +103,6 @@ export class LarkGateway implements RemoteGateway {
       source: 'lark-coding-assistant',
       policy: { dmMode: 'open', requireMention: false, respondToMentionAll: false },
       safety: { chatQueue: { enabled: true, mergeWhileBusy: false } },
-      handshakeTimeoutMs: 8_000,
       httpTimeoutMs: 30_000,
       respectProxyEnv: true,
     });
