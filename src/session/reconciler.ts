@@ -9,13 +9,21 @@ export interface SessionTmux {
   listSessions(prefix: string, signal?: AbortSignal): Promise<TmuxPane[]>;
   readMetadata(sessionName: string, signal?: AbortSignal): Promise<TmuxSessionMetadata | undefined>;
   writeMetadata(sessionName: string, metadata: TmuxSessionMetadata, signal?: AbortSignal): Promise<void>;
+  capture(paneId: string, lines?: number, signal?: AbortSignal): Promise<string>;
   killSession(sessionName: string, signal?: AbortSignal): Promise<void>;
+}
+
+export interface RemovedSession {
+  session: ManagedSession;
+  pane?: TmuxPane;
+  terminalOutput?: string;
 }
 
 export interface ReconcileResult {
   state: SessionState;
   liveSessions: ManagedSession[];
   removedActive?: ManagedSession;
+  removedSessions: RemovedSession[];
   changed: boolean;
 }
 
@@ -32,6 +40,7 @@ export class SessionReconciler {
 
   async reconcile(input: SessionState, discover = false, signal?: AbortSignal): Promise<ReconcileResult> {
     const sessions = { ...input.sessions };
+    const removedSessions: RemovedSession[] = [];
     let changed = false;
     for (const [id, session] of Object.entries(sessions)) {
       if (signal?.aborted) throw signal.reason;
@@ -49,9 +58,14 @@ export class SessionReconciler {
         continue;
       }
       if (result.status === 'dead') {
+        const terminalOutput = await this.tmux.capture(result.pane.paneId, 80, signal).catch((error) => {
+          void this.log(`failed to capture dead tmux pane ${result.pane.paneId}: ${errorMessage(error)}`);
+          return '';
+        });
         await this.tmux.killSession(result.pane.sessionName, signal).catch((error) => this.log(
           `failed to clean dead tmux session ${result.pane.sessionName}: ${errorMessage(error)}`,
         ));
+        removedSessions.push({ session, pane: result.pane, terminalOutput });
         delete sessions[id];
         this.misses.delete(id);
         changed = true;
@@ -60,6 +74,7 @@ export class SessionReconciler {
       const misses = (this.misses.get(id) ?? 0) + 1;
       this.misses.set(id, misses);
       if (misses < this.missingThreshold) continue;
+      removedSessions.push({ session });
       delete sessions[id];
       this.misses.delete(id);
       changed = true;
@@ -79,7 +94,7 @@ export class SessionReconciler {
     const state = changed
       ? { ...input, sessions, activeSessionId, updatedAt: Date.now() }
       : input;
-    return { state, liveSessions: Object.values(sessions), removedActive, changed };
+    return { state, liveSessions: Object.values(sessions), removedActive, removedSessions, changed };
   }
 
   private async confirm(session: ManagedSession, signal?: AbortSignal): Promise<TmuxInspectResult> {

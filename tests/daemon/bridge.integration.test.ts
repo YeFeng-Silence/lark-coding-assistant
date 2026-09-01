@@ -26,10 +26,18 @@ afterEach(async () => {
 describe.runIf(await hasTmux())('daemon bridge integration', () => {
   it('binds one private owner and forwards ordinary messages into the managed pane', async () => {
     const root = await mkdtemp(join(tmpdir(), 'lca-daemon-'));
+    const previousHome = process.env.HOME;
+    process.env.HOME = root;
+    cleanups.push(async () => {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    });
     const paths = resolveAppPaths(root);
     const store = new AppStore(paths);
     const fakeCodex = join(root, 'fake-codex.mjs');
     await writeFile(fakeCodex, `#!/usr/bin/env node
+import { closeSync, mkdirSync, openSync, unlinkSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 if (process.argv.includes('--version')) { console.log('codex-cli 0.147.0'); process.exit(0); }
 console.log('OpenAI Codex');
@@ -38,6 +46,32 @@ if (process.env.LARK_CODING_ASSISTANT_SESSION_ID === 'instant-fail') {
   console.log('failed to acquire thread writer lock');
   process.exit(7);
 }
+const sessionId = process.env.LARK_CODING_ASSISTANT_SESSION_ID || '';
+const nativeIds = {
+  default: '00000000-0000-4000-8000-000000000001',
+  second: '00000000-0000-4000-8000-000000000002',
+  pickerremote: '00000000-0000-4000-8000-000000000003',
+};
+const nativeId = nativeIds[sessionId];
+const agent = process.env.LARK_CODING_ASSISTANT_AGENT;
+let cleanupNative = () => undefined;
+if (nativeId && agent === 'traex' && sessionId !== 'timeout') {
+  const peerDir = join(process.cwd(), '.trae', 'cli', 'session-peers');
+  mkdirSync(peerDir, { recursive: true });
+  const peerPaths = [process.pid, process.ppid].map((pid) => join(peerDir, 'lca-' + sessionId + '-' + pid + '.json'));
+  for (const [index, peerPath] of peerPaths.entries()) {
+    writeFileSync(peerPath, JSON.stringify({ pid: index === 0 ? process.pid : process.ppid, threadId: nativeId }));
+  }
+  cleanupNative = () => { for (const peerPath of peerPaths) unlinkSync(peerPath, { force: true }); };
+}
+if (nativeId && agent === 'codex') {
+  const lockDir = join(process.cwd(), '.codex', 'thread-writer-locks');
+  mkdirSync(lockDir, { recursive: true });
+  const lockPath = join(lockDir, nativeId + '.lock');
+  const fd = openSync(lockPath, 'w');
+  cleanupNative = () => { closeSync(fd); unlinkSync(lockPath, { force: true }); };
+}
+process.on('exit', cleanupNative);
 if (process.argv.includes('resume') && !process.argv.includes('--last')) {
   console.log('Resume a previous session');
   console.log('Type to search                   Filter: [Cwd] Sort: [Updated]');
@@ -195,7 +229,7 @@ rl.on('line', (line) => {
     expect((await store.loadState()).sessions?.second).toBeUndefined();
     await requestDaemon(paths.socket, {
       method: 'agentSessionStarted',
-      candidate: { sessionId: 'second', agent: 'traex', agentSessionId: 'thread-second', cwd: root, source: 'resume' },
+      candidate: { sessionId: 'second', agent: 'traex', agentSessionId: '00000000-0000-4000-8000-000000000002', cwd: root, source: 'resume' },
     });
     const second = await secondStart;
     expect(second.ok).toBe(true);
@@ -317,7 +351,7 @@ rl.on('line', (line) => {
     await new Promise((resolve) => setTimeout(resolve, 150));
     await requestDaemon(paths.socket, {
       method: 'agentSessionStarted',
-      candidate: { sessionId: 'pickerremote', agent: 'codex', agentSessionId: 'picker-native', cwd: root, source: 'resume' },
+      candidate: { sessionId: 'pickerremote', agent: 'codex', agentSessionId: '00000000-0000-4000-8000-000000000003', cwd: root, source: 'resume' },
     });
     expect(await pickerSelection).toMatchObject({ type: 'session-created', session: { id: 'pickerremote' } });
     await requestDaemon(paths.socket, { method: 'stop', sessionId: 'pickerremote' });
@@ -328,7 +362,7 @@ rl.on('line', (line) => {
     const inactiveCompletion = await requestDaemon(paths.socket, {
       method: 'turnComplete',
       candidate: {
-        sessionId: 'second', agentSessionId: 'thread-second', eventId: 'turn-second', cwd: root,
+        sessionId: 'second', agentSessionId: '00000000-0000-4000-8000-000000000002', eventId: 'turn-second', cwd: root,
         lastAssistantMessage: 'INACTIVE SESSION RESULT',
       },
     });

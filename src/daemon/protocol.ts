@@ -8,6 +8,7 @@ export type DaemonRequest =
   | { id: string; method: 'ping' }
   | { id: string; method: 'shutdown' }
   | ({ id: string; method: 'start' } & StartSessionRequest)
+  | { id: string; method: 'reconcile' }
   | { id: string; method: 'status'; sessionId?: string }
   | { id: string; method: 'tail'; lines?: number }
   | { id: string; method: 'send'; text: string }

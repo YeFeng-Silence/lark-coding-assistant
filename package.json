@@ -1,6 +1,6 @@
 {
   "name": "lark-coding-assistant",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "Control local coding-agent CLI sessions from Feishu or Lark",
   "type": "module",
   "bin": {

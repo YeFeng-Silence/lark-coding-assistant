@@ -33,10 +33,16 @@ describe('SessionReconciler', () => {
     const deadPane = { ...pane('lark-coding-assistant-test', '%9', 'trae-cli'), dead: true, exitStatus: 0 };
     tmux.inspectResult = { status: 'dead', pane: deadPane };
     tmux.sessionResult = { status: 'dead', pane: deadPane };
+    tmux.terminalOutput = 'Error: native session is already active';
     const reconciler = new SessionReconciler(tmux);
     const result = await reconciler.reconcile(stateWith(session('test', 'traex')));
     expect(result.state.sessions?.test).toBeUndefined();
     expect(result.removedActive?.id).toBe('test');
+    expect(result.removedSessions).toMatchObject([{
+      session: { id: 'test' },
+      pane: { paneId: '%9', exitStatus: 0 },
+      terminalOutput: 'Error: native session is already active',
+    }]);
     expect(tmux.killed).toEqual(['lark-coding-assistant-test']);
   });
 
@@ -86,12 +92,14 @@ class FakeTmux implements SessionTmux {
   panes: TmuxPane[] = [];
   metadata = new Map<string, TmuxSessionMetadata>();
   killed: string[] = [];
+  terminalOutput = '';
 
   async inspectStatus(): Promise<TmuxInspectResult> { return this.inspectResult; }
   async inspectSession(): Promise<TmuxInspectResult> { return this.sessionResult; }
   async listSessions(): Promise<TmuxPane[]> { return this.panes; }
   async readMetadata(name: string): Promise<TmuxSessionMetadata | undefined> { return this.metadata.get(name); }
   async writeMetadata(name: string, metadata: TmuxSessionMetadata): Promise<void> { this.metadata.set(name, metadata); }
+  async capture(): Promise<string> { return this.terminalOutput; }
   async killSession(name: string): Promise<void> { this.killed.push(name); }
 }
 
