@@ -227,7 +227,7 @@ async function attachLocal(name: string): Promise<void> {
   const session = state.sessions?.[name];
   if (!session) {
     const exitEvent = state.recentSessionExits?.[name];
-    if (exitEvent?.reason === 'agent-session-conflict') throw sessionConflictError(exitEvent);
+    if (exitEvent) throw sessionExitError(exitEvent);
     throw new AppError('SESSION_NOT_FOUND', `no managed session: ${name}`, { sessionId: name });
   }
   if (!config) throw new AppError('NOT_INITIALIZED', 'not initialized');
@@ -240,7 +240,7 @@ async function attachLocal(name: string): Promise<void> {
       }, { cause: error });
     }
     const exitEvent = (await store.loadState()).recentSessionExits?.[name];
-    if (exitEvent?.reason === 'agent-session-conflict') throw sessionConflictError(exitEvent);
+    if (exitEvent) throw sessionExitError(exitEvent);
     throw new AppError('SESSION_NOT_FOUND', `managed session is no longer running: ${name}`, {
       sessionId: name,
     }, { cause: error });
@@ -259,17 +259,33 @@ async function attachLocal(name: string): Promise<void> {
     });
     child.once('exit', resolveExit);
   });
+  // A native resume picker is driven inside tmux after `start` has returned.
+  // Reconcile synchronously when its pane closes so the user sees the captured
+  // agent failure instead of a bare tmux detach.
+  await requestDaemon(paths.socket, { method: 'reconcile' }, 2_500).catch(() => undefined);
   const exitEvent = (await store.loadState()).recentSessionExits?.[name];
-  if (exitEvent?.reason === 'agent-session-conflict' && exitEvent.occurredAt >= attachedAt) {
-    throw sessionConflictError(exitEvent);
+  if (exitEvent && exitEvent.occurredAt >= attachedAt) {
+    throw sessionExitError(exitEvent);
   }
   if (code && code !== 0) process.exitCode = code;
 }
 
-function sessionConflictError(event: SessionExitEvent): AppError {
+function sessionExitError(event: SessionExitEvent): AppError {
+  if (event.reason === 'agent-exited') {
+    return new AppError(
+      'AGENT_EXITED',
+      `agent exited: ${event.sessionId}`,
+      {
+        sessionId: event.sessionId,
+        agent: event.agent,
+        exitStatus: event.exitStatus,
+        terminalExcerpt: event.terminalExcerpt,
+      },
+    );
+  }
   return new AppError(
     'AGENT_SESSION_IN_USE',
-    `agent session is already managed by ${event.ownerSessionId}`,
+    `agent session is already managed by ${event.ownerSessionId ?? 'another session'}`,
     {
       sessionId: event.sessionId,
       agent: event.agent,

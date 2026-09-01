@@ -40,6 +40,7 @@ describe('CLI error formatting', () => {
     ['INVALID_OPTIONS', { reason: '参数冲突' }, '命令参数无效：参数冲突'],
     ['INVALID_RESUME', { reason: '恢复方式冲突' }, '恢复参数无效：恢复方式冲突'],
     ['START_FAILED', { sessionId: 'api' }, '无法启动 session「api」'],
+    ['AGENT_EXITED', { sessionId: 'api', agent: 'codex', exitStatus: 1, terminalExcerpt: 'Error: active writer' }, 'Error: active writer'],
     ['AGENT_EXITED_DURING_STARTUP', { sessionId: 'api', agent: 'codex', exitStatus: 1, terminalExcerpt: 'Error: active writer' }, 'Error: active writer'],
     ['AGENT_IDENTITY_TIMEOUT', { sessionId: 'api' }, '无法确认恢复目标'],
     ['DAEMON_UNAVAILABLE', {}, 'lark-coding-assistant daemon restart'],

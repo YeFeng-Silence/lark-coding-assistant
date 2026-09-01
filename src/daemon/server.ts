@@ -217,6 +217,10 @@ export class AssistantDaemon {
         return { ok: true };
       }
       case 'start': return this.startSession(request.sessionId, request.cwd, request.agent, request.resume);
+      case 'reconcile': {
+        await this.reconcileSessions(true);
+        return { ok: true };
+      }
       case 'status': return { ok: true, value: await this.runtimeStatus(request.sessionId) };
       case 'tail': return { ok: true, value: await this.tail(request.lines ?? 80) };
       case 'send': return this.send(request.text);
@@ -337,11 +341,6 @@ export class AssistantDaemon {
       agentVersion,
       updatedAt: Date.now(),
     };
-    const pendingClaim = this.pendingAgentSessionClaims.get(sessionId);
-    if (pendingClaim) {
-      const claimed = this.claimStartingAgentSession(session, pendingClaim);
-      if (!claimed.ok) return claimed;
-    }
     if (resume && resume.mode !== 'picker') {
       const initialClaim = await context.stage(
         'agent-identity',
@@ -381,11 +380,6 @@ export class AssistantDaemon {
         `failed to disable startup preservation for ${sessionId}: ${errorMessage(error)}`,
       ));
       await this.rememberSessionWorkspace(session.cwd);
-    }
-    const lateClaim = this.pendingAgentSessionClaims.get(sessionId);
-    if (lateClaim) {
-      const claimed = this.claimStartingAgentSession(session, lateClaim);
-      if (!claimed.ok) return claimed;
     }
     try {
       await context.stage('metadata', () => this.tmux.writeMetadata(pane.sessionName, {
@@ -1808,20 +1802,66 @@ export class AssistantDaemon {
     if (session && session.agent !== candidate.agent) {
       return { ok: false, error: 'agent-session candidate does not match managed session' };
     }
-    const owner = this.findAgentSessionOwner(candidate.agent, candidate.agentSessionId, candidate.sessionId);
-    if (owner) {
-      this.pendingAgentSessionClaims.set(candidate.sessionId, candidate);
-      await this.log(
-        `agent session conflict: session=${candidate.sessionId} agent=${candidate.agent} agentSession=${candidate.agentSessionId} owner=${owner.id}`,
-      );
-      setTimeout(() => void this.rejectDuplicateAgentSession(candidate, owner), 100);
-      return fail(agentSessionInUse(candidate.sessionId, owner.id, candidate.agentSessionId));
-    }
     if (!session) {
       this.pendingAgentSessionClaims.set(candidate.sessionId, candidate);
+      await this.log(
+        `agent session hook candidate awaiting managed session: session=${candidate.sessionId} agent=${candidate.agent} agentSession=${candidate.agentSessionId}`,
+      );
       return { ok: true };
     }
-    if (session.agentSessionId === candidate.agentSessionId) return { ok: true };
+    if (session.agentSessionId) {
+      this.pendingAgentSessionClaims.delete(session.id);
+      if (session.agentSessionId !== candidate.agentSessionId) {
+        await this.log(
+          `ignored agent session hook candidate: session=${session.id} agent=${session.agent} hookSession=${candidate.agentSessionId} confirmedSession=${session.agentSessionId}`,
+        );
+      }
+      return { ok: true };
+    }
+
+    // Hook payloads are only candidates. A resumed agent can report an old
+    // native ID during its early hook lifecycle, so never bind or reject a
+    // session until the ID is corroborated by the current tmux pane PID.
+    this.pendingAgentSessionClaims.set(candidate.sessionId, candidate);
+    const agentSessionId = await this.resolvePaneNativeAgentSessionId(session);
+    if (!agentSessionId) return { ok: true };
+    if (agentSessionId !== candidate.agentSessionId) {
+      await this.log(
+        `ignored stale agent session hook candidate: session=${session.id} agent=${session.agent} hookSession=${candidate.agentSessionId} pidSession=${agentSessionId}`,
+      );
+    }
+    const confirmed = { ...candidate, agentSessionId, source: 'pid-confirmed' };
+    const owner = this.findAgentSessionOwner(session.agent, agentSessionId, session.id);
+    if (owner) {
+      await this.log(
+        `confirmed agent session conflict: session=${session.id} agent=${session.agent} agentSession=${agentSessionId} owner=${owner.id}`,
+      );
+      await this.rejectDuplicateAgentSession(confirmed, owner);
+      return fail(agentSessionInUse(session.id, owner.id, agentSessionId));
+    }
+
+    return this.persistConfirmedAgentSessionClaim(session, confirmed);
+  }
+
+  private async resolvePaneNativeAgentSessionId(session: ManagedSession): Promise<string | undefined> {
+    let pane;
+    try {
+      pane = await this.tmux.inspect(session.paneId);
+    } catch (error) {
+      void this.log(`failed to inspect pane for native session: session=${session.id} error=${errorMessage(error)}`);
+      return undefined;
+    }
+    if (!pane || pane.dead) return undefined;
+    return resolveNativeAgentSessionId(session.agent, pane.pid).catch((error) => {
+      void this.log(`failed to resolve native agent session for ${session.id}: ${errorMessage(error)}`);
+      return undefined;
+    });
+  }
+
+  private async persistConfirmedAgentSessionClaim(
+    session: ManagedSession,
+    candidate: AgentSessionStartedCandidate,
+  ): Promise<DaemonResult> {
     const updated = { ...session, agentSessionId: candidate.agentSessionId, updatedAt: Date.now() };
     this.state = {
       ...this.state,
@@ -1847,12 +1887,7 @@ export class AssistantDaemon {
   private async refreshNativeAgentSessionClaims(): Promise<void> {
     for (const session of Object.values(this.state.sessions ?? {})) {
       if (session.agentSessionId) continue;
-      const pane = await this.tmux.inspect(session.paneId);
-      if (!pane || pane.dead) continue;
-      const agentSessionId = await resolveNativeAgentSessionId(session.agent, pane.pid).catch((error) => {
-        void this.log(`failed to resolve native agent session for ${session.id}: ${errorMessage(error)}`);
-        return undefined;
-      });
+      const agentSessionId = await this.resolvePaneNativeAgentSessionId(session);
       if (!agentSessionId) continue;
       await this.handleAgentSessionStarted({
         sessionId: session.id,
@@ -1876,11 +1911,6 @@ export class AssistantDaemon {
       if (committedClaim) {
         session.agentSessionId = committedClaim;
         return { ok: true };
-      }
-      const pending = this.pendingAgentSessionClaims.get(session.id);
-      if (pending) {
-        const claimed = this.claimStartingAgentSession(session, pending);
-        if (!claimed.ok || session.agentSessionId) return claimed;
       }
       if (signal?.aborted) throw signal.reason;
       const pane = await this.tmux.inspect(session.paneId, signal);
@@ -1906,8 +1936,6 @@ export class AssistantDaemon {
     const pane = await this.tmux.inspect(session.paneId, signal);
     if (signal?.aborted) throw signal.reason;
     if (!pane || pane.dead) return fail(await this.startupExitedError(session, pane));
-    const pending = this.pendingAgentSessionClaims.get(session.id);
-    if (pending) return this.claimStartingAgentSession(session, pending);
     const committedClaim = this.state.sessions?.[session.id]?.agentSessionId;
     if (committedClaim) {
       session.agentSessionId = committedClaim;
@@ -2098,6 +2126,22 @@ export class AssistantDaemon {
       ).catch((error) => this.log(`exit notification failed: ${errorMessage(error)}`));
     }
     this.state = result.state;
+    for (const removed of result.removedSessions) {
+      const exitStatus = removed.pane?.exitStatus;
+      if (exitStatus === undefined || exitStatus === 0) continue;
+      const terminalExcerpt = startupTerminalExcerpt(tailScreen(removed.terminalOutput ?? '', 80).slice(-3_000));
+      await this.rememberSessionExitEvent({
+        sessionId: removed.session.id,
+        agent: removed.session.agent,
+        reason: 'agent-exited',
+        exitStatus,
+        terminalExcerpt: terminalExcerpt || undefined,
+        occurredAt: Date.now(),
+      });
+      await this.log(
+        `agent exited: session=${removed.session.id} agent=${removed.session.agent} exit=${exitStatus}`,
+      );
+    }
     for (const sessionId of this.pendingResumePickers.keys()) {
       if (!this.state.sessions?.[sessionId]) this.pendingResumePickers.delete(sessionId);
     }

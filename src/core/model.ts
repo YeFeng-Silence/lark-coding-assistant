@@ -35,9 +35,11 @@ export interface ManagedSession {
 export interface SessionExitEvent {
   sessionId: string;
   agent: AgentId;
-  reason: 'agent-session-conflict';
-  agentSessionId: string;
-  ownerSessionId: string;
+  reason: 'agent-session-conflict' | 'agent-exited';
+  agentSessionId?: string;
+  ownerSessionId?: string;
+  exitStatus?: number;
+  terminalExcerpt?: string;
   occurredAt: number;
 }
 

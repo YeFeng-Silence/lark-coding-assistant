@@ -62,6 +62,19 @@ function formatKnownError(error: AppError, context: ErrorContext): string[] {
         `  lark-coding-assistant attach ${ownerSessionId}`,
       ];
     }
+    case 'AGENT_EXITED': {
+      const exitStatus = typeof context.exitStatus === 'number' ? `（退出码 ${context.exitStatus}）` : '';
+      return [
+        `Agent 已退出${exitStatus}，session「${sessionId}」已关闭。`,
+        '',
+        '原始错误：',
+        safeValue(context.terminalExcerpt, 'Agent 未输出可用错误信息。'),
+        '',
+        '可查看日志或重新启动：',
+        '  lark-coding-assistant logs',
+        `  lark-coding-assistant start --name ${sessionId} --agent ${safeValue(context.agent, 'codex')}`,
+      ];
+    }
     case 'AGENT_EXITED_DURING_STARTUP': {
       const exitStatus = typeof context.exitStatus === 'number' ? `（退出码 ${context.exitStatus}）` : '';
       return [
