@@ -12,10 +12,8 @@
 - 支持 `/tail`、`/status`、`/stop`、远程处理审批与 Question，以及无法识别画面的手动遥控兜底；
 - 本地终端保持 attach 时，飞书仍可操作同一个 TUI；
 - 首次扫码后保存唯一 owner，后续通常无需绑定码；
-- 交互卡点击后原地更新，保留操作结果与处理时间；
-- daemon 单实例运行，可单独在后台启动；升级 CLI 时自动更新 daemon，tmux session 不受影响；
-- daemon 会从 tmux 元数据恢复仍在运行但尚未登记的受管 session。
-- 同一个 Agent 原生 session 只允许由一个存活的 LCA session 占用；重复恢复时会停止新 pane，并提示连接已有 session。
+- daemon 单实例运行；升级、重启或恢复 daemon 不会停止现有 tmux session；
+- 同一个 Agent 原生 session 只允许由一个 LCA session 占用；hook 候选会由当前 pane PID 复核后才绑定或判冲突。
 
 远程审批不按 codex、traex 或 claude 版本号限制。bridge 只有在当前 TUI 被高置信度识别为结构化交互，并且选项、默认光标和提交按键映射完整时才发送飞书交互卡。
 
@@ -24,52 +22,28 @@
 - macOS 或 Linux
 - Node.js 20.12+
 - tmux
-- codex、traex 和/或 claude
+- 至少安装一个 Agent：codex、traex 或 claude（只需安装实际要使用的 Agent）
 - 可访问飞书或 Lark Open Platform
-
-检查环境：
-
-```bash
-node --version
-tmux -V
-codex --version
-trae-cli --version
-claude --version
-```
-
-只需安装实际使用的 coding agent。
 
 ### 推荐的 coding agent 版本
 
 以下版本已完成 Stop hook、任务通知、审批、Question、单选/多选和手动遥控回归，建议优先使用：
 
-| Coding agent | 推荐版本 | 版本命令 |
-| --- | --- | --- |
-| codex | `0.148.0` | `codex --version` |
-| traex | `0.201.5` | `trae-cli --version` |
-| claude | `2.1.241` | `claude --version` |
+| Coding agent | 推荐版本 |
+| --- | --- |
+| codex | `0.148.0` |
+| traex | `0.201.5` |
+| claude | `2.1.241` |
 
 这些是已验证的推荐版本，不是强制版本锁定。其他版本通常也可以运行；如果新版调整了 TUI 文案或按键交互，结构化卡片可能暂时无法识别，此时仍可通过 `/tail` 和手动遥控模式完成操作。
 
 ## 一键安装与初始化
 
 ```bash
-npm install -g lark-coding-assistant@latest && lark-coding-assistant init
+npm install -g lark-coding-assistant@latest && lca init
 ```
 
-初始化向导会让你选择飞书或 Lark、可选配置常用 workspace 目录，并显示 PersonalAgent 注册二维码：
-
-1. 保持 `init` 命令运行；
-2. 使用飞书/Lark 扫描二维码；
-3. 创建或选择 PersonalAgent；
-4. 确认应用权限、事件和卡片回调；
-5. 等待终端显示配置已保存。
-
-二维码和链接是本次初始化临时生成的，请在有效期内完成。选择 Lark 后注册链接可能先显示飞书域名，识别账号后会自动切换授权域。
-
-配置保存在 `~/.lark-coding-assistant`。App Secret 只写入本机 `secrets.json`，文件权限为 `0600`。
-
-安装后可使用完整命令 `lark-coding-assistant`，也可使用等价的短命令 `lca`。下文示例优先使用 `lca`。
+初始化向导会选择飞书或 Lark、可选配置 workspace，并展示 PersonalAgent 注册二维码。保持命令运行，在有效期内完成扫码、应用选择、权限、事件和卡片回调；终端显示配置已保存即完成。配置保存在 `~/.lark-coding-assistant`，App Secret 仅写入权限为 `0600` 的本机 `secrets.json`。下文统一使用短命令 `lca`。
 
 ## 快速开始
 
@@ -108,7 +82,7 @@ lca start --name docs --agent claude --cwd ~/workspace/docs
 
 名称只允许字母、数字、下划线和短横线，最长 40 个字符。不指定名称时使用 `default`。
 
-Session 创建和恢复采用 30 秒启动事务。本地与飞书都会等到 agent 可用后再报告成功；超过 30 秒会取消底层启动、清理临时 tmux 和状态，并返回包含失败阶段与最近终端输出的提示，不会继续在后台运行。同名 session 正在启动时会直接提示“正在启动”，不同名称可以并行启动。Resume Picker 等待用户选择不计入 30 秒，提交选择后重新开始一次 30 秒恢复事务。该限制只作用于启动链路，不影响消息、审批、Question、`status`、`tail`、`attach`、`stop` 或 daemon 管理。
+Session 创建和恢复有 30 秒启动事务；超时会清理临时 tmux/state，并返回失败阶段与最近终端输出。Resume Picker 等待选择不计时，提交选择后重新开始 30 秒恢复事务。该限制不影响消息、交互、`status`、`tail`、`attach`、`stop` 或 daemon 管理。
 
 一个 PersonalAgent 私聊同一时刻只连接一个 active session。在飞书发送：
 
@@ -116,7 +90,7 @@ Session 创建和恢复采用 30 秒启动事务。本地与飞书都会等到 a
 /sessions
 ```
 
-机器人会发送一张交互卡，按 codex、traex、claude 分组展示仍存活的 session，并显示每个项目的绝对路径。`● 当前` 表示 active session，点击其他 session 的“连接”按钮即可切换，点击“关闭”可停止对应 agent 和 tmux session；也可点击“新建 Session”，填写名称、Agent、项目目录和恢复方式。项目目录可直接从已有 Session、最近成功目录和常用 workspace 中选择，必要时可手动填写 `/绝对路径` 或 `~/路径`。创建成功后会自动连接；原 session 列表仍可查看、连接和关闭，只会禁用已经使用过的“新建 Session”按钮。也可使用：
+机器人会发送一张按 codex、traex、claude 分组的交互卡，并显示绝对项目路径。`● 当前` 表示 active session；可直接连接、关闭或新建。新建表单支持从已有 session、最近目录和 workspace 中选项目，也可手动填写 `/绝对路径` 或 `~/路径`。创建成功后自动连接；旧列表仍可用于连接和关闭。也可使用：
 
 ```text
 /use web
@@ -140,9 +114,7 @@ lca workspace remove ~/code/company
 
 配置修改会在下一次打开飞书“新建 Session”表单时生效，不需要重启 daemon。
 
-飞书新建 Session 时，LCA 按以下顺序合并项目目录：仍存活 Session 的目录、最近成功启动的目录、已配置 workspace 下的项目。每个 workspace 只扫描下一级目录，Git 仓库优先于普通目录；同一路径只展示一次。项目目录与其他启动信息在同一张卡片内一次提交；需要使用列表外目录时，选择“手动填写其他路径…”并填写其他路径。最近目录最多保留 30 条。
-
-候选扫描有 2 秒和 500 个目录的上限。达到上限或部分目录不可访问时，卡片仍会展示已经找到的项目，并保留“手动填写其他路径”兜底。手动输入支持 `~/...`，启动前会展开并校验；启动结果、状态和 Session 列表始终展示完整绝对路径。
+飞书新建 Session 会合并存活 session、最近成功目录和 workspace 下一级项目；Git 仓库优先、同一路径去重、最近目录最多保留 30 条。扫描上限为 2 秒或 500 个目录，超限或无权限时仍可使用“手动填写其他路径…”。手动输入支持 `~/...`，启动前会展开校验；所有状态与结果始终显示绝对路径。
 
 ## 恢复 agent 历史会话
 
@@ -167,22 +139,18 @@ lca start --agent codex --resume-all
 
 `--name` 是 bridge 管理的 tmux session 名；`--resume <session-id>` 是 coding agent 自己的历史 session ID，两者不是同一个概念。claude 的 `--resume-all` 与 `--resume` 都会打开其原生恢复选择器。
 
-飞书只提供两种恢复方式：新会话，或打开 agent 原生 Resume Picker。选择 Resume Picker 后，bridge 会读取 codex、traex 或 claude 当前展示的历史会话列表并生成飞书卡片供选择；不会要求在飞书输入历史 Session ID，也不会直接把原始 picker 交给手动遥控。卡片会显示当前位置与总数，只有存在未展示的候选项时才出现翻页按钮。新旧版本 claude 的 Resume Picker 标题格式均可识别。
-
-启动结果、session 列表、状态卡片和失败提示中的工作目录统一显示绝对路径。Resume Picker 启动失败时，失败卡片会提供“新建 Session”和“查看 Sessions”入口，原 session 列表不会因此失效。
+飞书只提供“新会话”和原生 Resume Picker。Picker 会被解析为卡片，不要求手输历史 ID，也不会进入手动遥控；仅存在未展示候选项时才显示翻页。启动结果、session 列表、状态与失败提示统一显示绝对路径；Picker 失败卡仍提供“新建 Session”和“查看 Sessions”。
 
 ## 本地终端与 tmux
 
-本地保持 attach 不影响飞书操作。如果要暂时离开 tmux，按 `Ctrl-b`，松开后再按 `d`。这只会 detach 本地终端，不会停止 agent 或 daemon。
-
-重新进入：
+本地保持 attach 不影响飞书操作。临时离开 tmux 使用 `Ctrl-b` 后按 `d`，不会停止 Agent 或 daemon；重新进入：
 
 ```bash
 lca attach default
 lca attach web
 ```
 
-不要把 tmux detach 与飞书 `/detach` 混淆：前者只离开本地界面，后者会解除私聊绑定并关闭自动重连。
+飞书 `/detach` 则会解除私聊绑定并关闭自动重连。
 
 ## 飞书/Lark 私聊命令
 
@@ -205,23 +173,14 @@ lca attach web
 ## 本地命令
 
 ```bash
-# 启动和进入
 lca start [--name <name>] [--agent codex|traex|claude] [--cwd <path>] [--resume [session-id]|--resume-last|--resume-all]
 lca attach [name]
-
-# 状态和停止
 lca status [name]
 lca stop [name]
-
-# 私聊绑定
 lca bind-code
 lca reset-owner
-
-# 日志
 lca logs
 lca logs --lines 300
-
-# bridge daemon
 lca daemon          # 仅启动后台 bridge daemon
 lca daemon status
 lca daemon stop
@@ -236,15 +195,7 @@ lca daemon restart
 
 ## 绑定规则
 
-首次扫码会保存可信 owner。后续启动会自动沿用该 owner 和私聊，通常不再需要绑定码。
-
-以下情况才需要 `lca bind-code`：
-
-- 曾在飞书发送 `/detach`；
-- 需要迁移到另一个私聊；
-- 当前配置没有保存 owner 身份。
-
-绑定码是 10 分钟有效的一次性命令，只在本地保存 scrypt 哈希：
+首次扫码会保存可信 owner，后续通常无需绑定码。仅在飞书执行过 `/detach`、迁移私聊或没有保存 owner 时运行 `lca bind-code`。绑定码 10 分钟有效，只在本地保存 scrypt 哈希：
 
 ```text
 /attach <一次性绑定码>
@@ -252,44 +203,21 @@ lca daemon restart
 
 ## 交互卡与消息排队
 
-当 active agent 显示结构化编号选择时，bridge 会从当前终端画面识别标题、上下文、选项、光标位置、勾选状态和提交方式，并在飞书发送对应的审批、Question 或通用选择卡。卡片选项直接来自当前 TUI，不使用固定的按钮集合。
+当 active agent 显示结构化编号选择时，bridge 从终端提取标题、选项、光标、勾选状态和提交方式，归一化为单选、多选或补充输入语义；三个 Agent 共用同一套卡片和 tmux 提交流程。选项只来自当前 TUI，无法完整识别时不会生成操作按钮。
 
-识别结果会先归一化为与 agent 无关的交互语义：单选或多选、选择切换键、最终提交方式，以及可选的补充内容编辑器。后续卡片渲染和 tmux 操作只消费这些语义，不按 codex、traex 或 claude 分别实现提交流程。各 agent 的适配层只负责识别终端文案与按键提示，因此未来版本只要仍能明确展示选项状态和提交方式，就可以复用同一套执行逻辑。
+单选直接提交；多选是事务式表单，勾选和补充内容先只保存在飞书，点击“提交答案”后才一次同步到本地。Agent 出现二次确认时，原卡片会刷新为下一步确认。
 
-单选会直接提交所选答案；多选采用事务式表单，勾选、取消和修改自定义内容只保存在飞书卡片中，不会逐项操作本地终端。只有点击“提交答案”后，bridge 才会一次读取完整表单、同步本地 CLI 的最终选择和自定义内容，并执行一次提交。如果 agent 随后显示 `Submit answers / Cancel` 等二次确认，原卡片会继续刷新为新的确认卡。“继续对话”等非答案操作仍即时同步。远程操作引起的输入、光标移动和勾选变化只更新原卡片，不会重复推送新的交互卡。
-
-点击卡片时会重新校验：
-
-- 操作者仍是 owner；
-- agent、active session 和 pane 没有变化；
-- 交互内容、勾选状态和画面修订号仍与发卡时一致；
-- 卡片签名和 nonce 有效。
-
-交互卡不会仅因等待时间较长而失效；只要同一个选择画面仍在等待，即使隔夜也可处理。画面、pane、agent 或 active session 变化后旧卡会立即失效。停止和 session 选择卡仍使用短时有效期。
-
-codex、traex、claude 的审批、Question 和其他编号选择统一使用同一套结构化识别与画面指纹校验；无法完整识别时不会盲目生成操作按钮。
+每次卡片操作都会校验 owner、active session、pane、画面指纹、签名和 nonce。选择画面不因等待时间失效；画面、pane、Agent 或 active session 改变后旧卡立即失效。停止与 session 选择卡使用短时有效期。
 
 ## 手动遥控兜底
 
-当 active pane 的输出稳定 3 秒、状态为 `input` 或 `unknown`，且 bridge 无法生成高置信度结构化操作卡时，会自动发送一张手动遥控卡。同一个 session、pane 和画面指纹只通知一次；也可以随时发送 `/manual` 主动打开。
+当 active pane 稳定 3 秒、状态为 `input` 或 `unknown`，但无法生成高置信度操作卡时，会自动发送手动遥控卡；也可使用 `/manual` 主动打开。它支持方向键、Enter、Esc、Tab、Space、Ctrl+C、仅输入、输入并提交和刷新。除刷新外，每次操作都会校验 owner、session、pane 与画面指纹；它不判断按键业务安全性，请先确认画面。退出手动模式只禁用卡片，不停止 Agent。
 
-手动遥控卡直接展示最近的终端输出，支持方向键、Enter、Esc、Tab、Space、Ctrl+C、仅输入文本和输入后提交。每次操作只向当前 tmux pane 发送一个原子动作，然后在原卡片刷新最新画面。除“刷新”外，所有操作都会校验 owner、active session、agent、pane 和画面指纹；画面已变化时不会执行旧操作，而是先刷新卡片让用户重新确认。
-
-手动模式不会判断某个按键在当前 TUI 中是否安全，因此只应在确认终端画面后操作。点击“退出手动模式”只会禁用当前遥控卡，不会停止 coding agent 或 tmux。若重新识别到结构化审批或 Question，遥控卡会停止操作并恢复发送语义化交互卡。
-
-agent 正在审批、本地输入框已有草稿或画面未知时，普通消息会进入最多 100 条的内存 FIFO 队列。恢复安全输入状态后按顺序发送；daemon 重启、`/detach`、切换或停止 session 时队列清空。
+Agent 正在交互、本地输入框有草稿或画面未知时，普通消息会进入最多 100 条的内存 FIFO；恢复安全输入后顺序发送。daemon 重启、`/detach`、切换或停止 session 时队列清空。
 
 ## “等待用户输入”通知
 
-通知触发和通知内容提取是两条独立逻辑：
-
-1. agent 原生 `Stop` hook 产生候选完成；
-2. daemon 继续观察 active tmux pane；
-3. 只有画面回到 `idle` 且连续 2.5 秒没有新输出，才确认 agent 已停止输出；
-4. 多个中间完成事件会合并，只发送最新一条；
-5. 确认发送时统一使用完成事件中的 `last-assistant-message` 作为最终回复。
-
-因此终端画面只负责确认 agent 已停止输出，不再用于提取通知正文。非 active session 的完成事件不会推送。
+Agent 原生 `Stop` hook 提供候选结论；daemon 仅在 active pane 回到 `idle` 且连续 2.5 秒无新输出后发送通知。多个中间事件会合并，正文始终使用最后一条 `last-assistant-message`；非 active session 不推送。
 
 ## 升级与卸载
 
@@ -298,7 +226,7 @@ npm install -g lark-coding-assistant@latest
 lca daemon restart
 ```
 
-如果升级后直接执行 `start`，CLI 会自动比较自身与 daemon 版本并优雅更新 daemon，不停止现有 tmux session。
+直接执行 `lca start` 也会比较 CLI 与 daemon 版本并优雅更新 daemon，不停止现有 tmux session。
 
 卸载：
 
@@ -317,54 +245,20 @@ npm uninstall -g lark-coding-assistant
 └── runtime/daemon.{pid,sock}
 ```
 
-daemon 的常规日志、stdout、stderr 和启动崩溃都会写入 `logs/assistant.log`。
-
-## 错误与调试
-
-CLI 默认只显示简洁的中文错误和可执行的解决建议，不会把 Node.js 堆栈、源码路径或内部异常直接输出到终端。例如 session 已经运行时，可以按提示连接现有 session 或换一个名称。
-
-查看 daemon 状态和日志：
+daemon 日志、stdout、stderr 与启动崩溃都写入 `logs/assistant.log`。CLI 默认只显示友好错误和下一步建议；需要排查时使用：
 
 ```bash
-lark-coding-assistant daemon status
-lark-coding-assistant logs
+lca daemon status
+lca logs
 ```
 
 需要排查未知异常时，可以只为当前命令开启调试输出：
 
 ```bash
-LARK_CODING_ASSISTANT_DEBUG=1 lark-coding-assistant <command>
+LARK_CODING_ASSISTANT_DEBUG=1 lca <command>
 ```
 
-调试模式会在友好提示后追加原始错误堆栈，请勿把可能包含本机路径或环境信息的完整输出直接发布到公开渠道。
-
-## 常见问题
-
-### 飞书消息进入了错误的 session
-
-发送 `/sessions`，查看 `● 当前` 并点击目标 session。普通消息永远只进入 active session。
-
-### 没收到某个 session 的完成通知
-
-只有 active session 会主动推送。session 必须由当前 CLI 创建，才能注入统一的 `Stop` hook。
-
-### 消息提示已排队
-
-通常是 agent 正在审批、本地输入框已有草稿或画面无法识别。发送 `/tail` 查看当前状态。
-
-### 卡片或按钮显示已失效
-
-说明卡片有效期已过，或 agent、active session、pane、交互画面、nonce 已变化。bridge 会尽量把原卡片更新为带有“卡片已失效”提示的只读状态；如果平台拒绝更新，则发送文字提示。请重新发送对应命令获取新卡：session 操作使用 `/sessions`，审批或 Question 可先用 `/tail` 确认当前画面并等待新卡。
-
-### 关闭本地终端后 session 还在吗
-
-关闭 attach 的终端通常不会停止 tmux，可用 `lark-coding-assistant attach <name>` 恢复。电脑关机、tmux server 被终止或 agent 自身退出后无法继续。
-
-agent 或对应 tmux pane 退出后，daemon 会在下一次轮询中自动从 `state.json` 移除该 session；如果退出的是 active session，会先发送退出通知，再切换到其他仍存活的 session。
-
-### 完全重新配置 PersonalAgent
-
-重新运行 `lark-coding-assistant init`。如果扫码账号发生变化，旧 chat 绑定会被清除，新用户成为 owner。
+调试模式会附加原始堆栈，可能含本机路径或环境信息，请勿直接公开。
 
 ## 开发与发布
 
@@ -394,3 +288,29 @@ npm publish
 ```
 
 不要在仓库中保存 npm token；发布身份由开发机或 CI 的 npm 配置提供。
+
+## 常见问题
+
+### 飞书消息进入了错误的 session
+
+发送 `/sessions`，查看 `● 当前` 并点击目标 session。普通消息永远只进入 active session。
+
+### 没收到某个 session 的完成通知
+
+只有 active session 会主动推送。session 必须由当前 CLI 创建，才能注入统一的 `Stop` hook。
+
+### 消息提示已排队
+
+通常是 agent 正在审批、本地输入框已有草稿或画面无法识别。发送 `/tail` 查看当前状态。
+
+### 卡片或按钮显示已失效
+
+Agent、active session、pane、画面或 nonce 已变化。重新发送 `/sessions`，或先用 `/tail` 查看审批/Question 当前画面并等待新卡。
+
+### 关闭本地终端后 session 还在吗
+
+关闭 attach 的终端通常不会停止 tmux，可用 `lca attach <name>` 恢复。电脑关机、tmux server 被终止或 Agent 自身退出后无法继续；daemon 会在下一次轮询移除已退出 session，并切换到其他存活 session。
+
+### 完全重新配置 PersonalAgent
+
+重新运行 `lca init`。如果扫码账号发生变化，旧 chat 绑定会被清除，新用户成为 owner。
