@@ -3,6 +3,7 @@ import { runFile, runFileWithInput } from '../platform/process.js';
 import { assertSafeTmuxTarget, sanitizeRemoteInput, shellQuote } from './input.js';
 import type { TmuxCreateOptions, TmuxInspectResult, TmuxPane, TmuxSessionMetadata } from './types.js';
 import { AppError } from '../core/errors.js';
+import { parseStartupRecovery } from '../session/startup-recovery.js';
 
 const PANE_FORMAT = '#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_start_command}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_dead}\t#{pane_dead_status}\t#{cursor_x}\t#{cursor_y}';
 const METADATA_OPTIONS = {
@@ -12,6 +13,7 @@ const METADATA_OPTIONS = {
   cwd: '@lca-cwd',
   agentVersion: '@lca-agent-version',
   agentSessionId: '@lca-agent-session-id',
+  startupRecovery: '@lca-resume-recovery', // Preserve the existing tmux metadata key.
 } as const;
 
 export class TmuxController {
@@ -121,6 +123,7 @@ export class TmuxController {
       cwd: metadata.cwd,
       agentVersion: metadata.agentVersion,
       agentSessionId: metadata.agentSessionId,
+      startupRecovery: metadata.startupRecovery ? JSON.stringify(metadata.startupRecovery) : undefined,
     };
     for (const [key, option] of Object.entries(METADATA_OPTIONS) as [keyof typeof METADATA_OPTIONS, string][]) {
       const value = values[key];
@@ -137,7 +140,7 @@ export class TmuxController {
     for (const [key, option] of Object.entries(METADATA_OPTIONS) as [keyof typeof METADATA_OPTIONS, string][]) {
       const result = await runFile(this.binary, ['show-options', '-t', sessionName, '-v', option], { signal }).catch(() => undefined);
       if (!result) {
-        if (key === 'agentSessionId') continue;
+        if (key === 'agentSessionId' || key === 'startupRecovery') continue;
         return undefined;
       }
       values[key] = result.stdout.trim();
@@ -151,6 +154,7 @@ export class TmuxController {
       cwd: values.cwd,
       agentVersion: values.agentVersion,
       agentSessionId: values.agentSessionId || undefined,
+      startupRecovery: parseStartupRecovery(values.startupRecovery),
     };
   }
 

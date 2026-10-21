@@ -436,17 +436,22 @@ describe('LarkGateway form callbacks', () => {
     expect(serialized).toContain('查看 Sessions');
   });
 
-  it('rolls back an initial Resume Picker when its card cannot be delivered', async () => {
+  it.each(['picker', 'manual'] as const)('offers recovery when the initial %s card cannot be delivered', async (mode) => {
     mocks.updateCard.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('invalid card payload'));
     const { LarkGateway } = await import('../../src/lark/gateway.js');
     const session = {
       id: 'restore', agent: 'codex' as const, sessionName: 'lca-restore', paneId: '%9',
       cwd: '/work', agentVersion: 'test', updatedAt: 1,
+      startupRecovery: { phase: 'manual' as const, resume: { mode: 'picker' as const } },
     };
     const rollback = vi.fn(async () => undefined);
     const handler: LarkGatewayHandler = {
       onMessage: async () => undefined,
-      onAction: vi.fn(async () => ({
+      onAction: vi.fn(async (): Promise<LarkActionResult> => mode === 'manual' ? {
+        type: 'manual', content: '等待手动恢复', view: {
+          session, screen: detectClaudeScreen('Update required', true), output: 'Update required', capturedAt: new Date(),
+        },
+      } : ({
         type: 'resume-picker' as const, content: '请选择', session,
         picker: {
           agent: 'codex' as const, fingerprint: 'picker', selectedIndex: 0,
@@ -474,7 +479,7 @@ describe('LarkGateway form callbacks', () => {
     });
     await vi.waitFor(() => expect(rollback).toHaveBeenCalledWith(session));
     expect(mocks.send).toHaveBeenLastCalledWith('oc_1', expect.objectContaining({
-      text: expect.stringContaining('新建 Session 表单打开失败'),
+      text: expect.stringContaining('终端已保留'),
     }));
   });
 

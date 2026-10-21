@@ -1,6 +1,6 @@
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { chmod, mkdir } from 'node:fs/promises';
-import type { AppConfig, AppSecrets, SessionState } from './model.js';
+import type { AppConfig, AppSecrets, SessionState, StartupRecovery } from './model.js';
 import { emptyState } from './model.js';
 import type { AppPaths } from './paths.js';
 import { readJson, writeJsonAtomic } from './atomic-json.js';
@@ -59,7 +59,8 @@ export class AppStore {
     if (!state) return emptyState();
     const sessions = Object.fromEntries(Object.entries(state.sessions ?? {}).flatMap(([id, session]) => {
       const agent = normalizeAgentId(session.agent);
-      return agent ? [[id, { ...session, agent }]] : [];
+      const { resumeRecovery, ...current } = session;
+      return agent ? [[id, { ...current, agent, startupRecovery: current.startupRecovery ?? resumeRecovery }]] : [];
     }));
     const recentWorkspaces = await normalizeRecentWorkspaces(state.recentWorkspaces ?? []);
     return { ...state, sessions, recentWorkspaces };
@@ -99,7 +100,10 @@ async function normalizeRecentWorkspaces(
 }
 
 interface LegacyState extends Omit<SessionState, 'sessions'> {
-  sessions?: Record<string, Omit<NonNullable<SessionState['sessions']>[string], 'agent'> & { agent: string }>;
+  sessions?: Record<string, Omit<NonNullable<SessionState['sessions']>[string], 'agent'> & {
+    agent: string;
+    resumeRecovery?: StartupRecovery;
+  }>;
 }
 
 export function createBindCode(): string {

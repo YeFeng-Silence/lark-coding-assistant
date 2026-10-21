@@ -4,6 +4,40 @@ import { SessionReconciler, inferLegacyAgent, type SessionTmux } from '../../src
 import type { TmuxInspectResult, TmuxPane, TmuxSessionMetadata } from '../../src/tmux/types.js';
 
 describe('SessionReconciler', () => {
+  it.each(['codex', 'traex', 'claude'] as const)('restores the original %s connection when a pending resume dies', async (agent) => {
+    const tmux = new FakeTmux();
+    const first = session('first', agent);
+    const previous = { ...session('previous', agent), paneId: '%3' };
+    const pending = { ...session('pending', agent), paneId: '%4', startupRecovery: {
+      phase: 'manual' as const, resume: { mode: 'picker' as const }, previousSessionId: previous.id,
+      previousPaneId: previous.paneId, activationRevision: 8,
+    } };
+    const livePane = pane(previous.sessionName, previous.paneId, agent);
+    const dead = { ...pane(pending.sessionName, pending.paneId, agent), dead: true, exitStatus: 7 };
+    tmux.inspectStatus = async (id) => id === pending.paneId ? { status: 'dead', pane: dead }
+      : { status: 'live', pane: { ...livePane, paneId: id ?? '%2' } };
+    tmux.inspectSession = async () => ({ status: 'dead', pane: dead });
+    const result = await new SessionReconciler(tmux).reconcile({
+      schemaVersion: 2, sessions: { first, previous, pending }, updatedAt: 1,
+      activeSessionId: pending.id, connectionRevision: 8,
+    });
+    expect(result.state.activeSessionId).toBe('previous');
+    expect(result.state.sessions?.pending).toBeUndefined();
+    expect(result.state.sessions?.first).toBeDefined();
+  });
+
+  it('recovers pending resume phase and rollback identity from tmux metadata', async () => {
+    const tmux = new FakeTmux();
+    const startupRecovery = { phase: 'manual' as const, resume: { mode: 'picker' as const },
+      previousSessionId: 'previous', previousPaneId: '%1', activationRevision: 2 };
+    tmux.panes = [pane('lark-coding-assistant-docs', '%3', 'claude')];
+    tmux.metadata.set('lark-coding-assistant-docs', {
+      managed: true, sessionId: 'docs', agent: 'claude', cwd: '/work/docs', agentVersion: 'test', startupRecovery,
+    });
+    const result = await new SessionReconciler(tmux).reconcile({ schemaVersion: 2, sessions: {}, updatedAt: 1 }, true);
+    expect(result.state.sessions?.docs?.startupRecovery).toEqual(startupRecovery);
+  });
+
   it('keeps state on transient tmux failures', async () => {
     const tmux = new FakeTmux();
     tmux.inspectResult = { status: 'unavailable', error: new Error('temporary socket failure') };
@@ -94,8 +128,8 @@ class FakeTmux implements SessionTmux {
   killed: string[] = [];
   terminalOutput = '';
 
-  async inspectStatus(): Promise<TmuxInspectResult> { return this.inspectResult; }
-  async inspectSession(): Promise<TmuxInspectResult> { return this.sessionResult; }
+  async inspectStatus(_paneId?: string): Promise<TmuxInspectResult> { return this.inspectResult; }
+  async inspectSession(_name?: string): Promise<TmuxInspectResult> { return this.sessionResult; }
   async listSessions(): Promise<TmuxPane[]> { return this.panes; }
   async readMetadata(name: string): Promise<TmuxSessionMetadata | undefined> { return this.metadata.get(name); }
   async writeMetadata(name: string, metadata: TmuxSessionMetadata): Promise<void> { this.metadata.set(name, metadata); }

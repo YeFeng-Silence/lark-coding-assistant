@@ -13,6 +13,7 @@ import { sessionStartupFailure } from '../session/startup-failure.js';
 import { SessionStartCoordinator, type SessionStartContext, type SessionStartSource } from '../session/start-coordinator.js';
 import { SessionReconciler } from '../session/reconciler.js';
 import { resolveNativeAgentSessionId } from '../session/native-session.js';
+import { newSessionPromptReady, startupProgress, startupRollbackTarget } from '../session/startup-recovery.js';
 import { TmuxController } from '../tmux/controller.js';
 import type { DaemonRequest, DaemonResult, RuntimeSessionStatus, RuntimeStatus } from './protocol.js';
 import { getAgentAdapter } from '../agents/registry.js';
@@ -72,6 +73,9 @@ export class AssistantDaemon {
   private readonly closedManualCards = new Set<string>();
   private readonly pendingAgentSessionClaims = new Map<string, AgentSessionStartedCandidate>();
   private readonly pendingResumePickers = new Map<string, StartSessionRequest>();
+  private readonly startupOperations = new Set<string>();
+  private readonly deliveredResumePickers = new Map<string, string>();
+  private startupRefreshInFlight?: Promise<void>;
   private readonly pendingStartupConflicts = new Map<string, { request: StartSessionRequest; ownerSessionId: string }>();
   private readonly workspaceSnapshots = new WorkspaceSnapshotStore();
   private readonly sessionStarts: SessionStartCoordinator;
@@ -341,14 +345,23 @@ export class AssistantDaemon {
       agentVersion,
       updatedAt: Date.now(),
     };
+    if (context.source === 'lark') {
+      const previous = this.activeSession();
+      session.startupRecovery = {
+        phase: resume?.mode === 'picker' ? 'picker' : resume ? 'identity' : 'manual', resume,
+        previousSessionId: previous?.id, previousPaneId: previous?.paneId,
+      };
+    }
     if (resume && resume.mode !== 'picker') {
       const initialClaim = await context.stage(
         'agent-identity',
         () => this.waitForInitialAgentSessionClaim(session, pane.pid, context.signal),
       );
       if (!initialClaim.ok) {
-        return initialClaim;
+        if (context.source !== 'lark' || initialClaim.errorCode !== 'AGENT_IDENTITY_TIMEOUT') return initialClaim;
+        session.startupRecovery!.phase = 'manual';
       }
+      if (session.agentSessionId) session.startupRecovery = undefined;
     } else {
       const stable = await context.stage(
         'startup-stability',
@@ -358,24 +371,40 @@ export class AssistantDaemon {
         return stable;
       }
     }
+    if (!resume && context.source === 'lark') {
+      const ready = await context.stage('startup-prompt', () => this.waitForNewSessionPrompt(
+        session, Math.min(2_500, Math.max(100, context.remainingMs() - 1_000)), context.signal,
+      ));
+      if (ready) {
+        const agentSessionId = await context.stage('agent-identity', () => resolveNativeAgentSessionId(
+          session.agent, pane.pid, undefined, context.signal,
+        ).catch(() => undefined));
+        if (agentSessionId) {
+          const claimed = this.claimStartingAgentSession(session, {
+            sessionId, agent: session.agent, cwd: session.cwd, agentSessionId, source: 'startup-prompt',
+          });
+          if (!claimed.ok) return claimed;
+        }
+        session.startupRecovery = undefined;
+      }
+    }
     const resumePicker = resume?.mode === 'picker' && context.source === 'lark'
       ? await context.stage('resume-picker', async () => {
           const picker = await this.waitForResumePicker(
             session,
             undefined,
-            context.remainingMs(),
+            Math.min(2_500, Math.max(100, context.remainingMs() - 1_000)),
             context.signal,
           );
           if (!picker) {
-            throw new AppError('START_FAILED', 'agent resume picker did not become available', {
-              sessionId,
-              agent: agentId,
-            });
+            const current = await this.tmux.inspect(session.paneId, context.signal);
+            if (!current || current.dead) throw await this.startupExitedError(session, current);
+            session.startupRecovery!.phase = 'manual';
           }
           return picker;
         })
       : undefined;
-    if (resume?.mode !== 'picker') {
+    if (resume?.mode !== 'picker' && !session.startupRecovery) {
       await this.tmux.preserveOnExit(session.sessionName, false, context.signal).catch((error) => this.log(
         `failed to disable startup preservation for ${sessionId}: ${errorMessage(error)}`,
       ));
@@ -389,6 +418,7 @@ export class AssistantDaemon {
         cwd,
         agentVersion,
         agentSessionId: session.agentSessionId,
+        startupRecovery: session.startupRecovery,
       }, context.signal));
       await context.stage('state', () => this.commitStartedSession(session, binding));
       await this.clearSessionExitEvent(sessionId, context.startedAt);
@@ -597,9 +627,10 @@ export class AssistantDaemon {
         } catch (error) {
           await this.handleResumePickerDeliveryFailure(result.session);
           await this.log(`resume picker notification failed: session=${result.session.id} error=${errorMessage(error)}`);
-          await this.gateway?.sendText(message.chatId, 'Resume Picker 卡片发送失败，临时 Session 已清理，请重试。');
+          await this.gateway?.sendText(message.chatId, 'Resume Picker 卡片发送失败，终端已保留。可发送 /manual，或通过 /sessions 重新连接。');
         }
       }
+      else if (result.state === 'manual') await this.sendStartupManual(result.session);
       else if (result.state === 'conflict') await this.gateway?.sendStartupConflict(message.chatId, result.request, result.owner);
       else await this.gateway?.sendText(message.chatId, remoteStartSuccess(result.session));
       return;
@@ -860,6 +891,9 @@ export class AssistantDaemon {
         return { type: 'error', content: '目标 session 已变化，请重新发送 /sessions。' };
       }
       const result = await this.useSession(target.id);
+      if (result.ok && this.state.sessions?.[target.id]?.startupRecovery) {
+        return this.startupManualResult(this.state.sessions[target.id]!);
+      }
       return result.ok
         ? { type: 'success', content: `已连接到 ${target.id}` }
         : { type: 'error', content: result.error };
@@ -935,6 +969,7 @@ export class AssistantDaemon {
       if (result.state === 'picker') {
         return { type: 'resume-picker', content: '请选择要恢复的历史 Session。', session: result.session, picker: result.picker };
       }
+      if (result.state === 'manual') return this.startupManualResult(result.session);
       if (result.state === 'conflict') {
         return { type: 'startup-conflict', content: '目标原生 Session 已由现有 LCA Session 连接。', request: result.request, owner: result.owner };
       }
@@ -976,6 +1011,12 @@ export class AssistantDaemon {
         view: this.manualView(session, screen, 'stale', '请确认最新终端画面后重试。', undefined, action.manualMode),
       };
     }
+    if (action.action === 'cancel-create' && session.startupRecovery) {
+      const stopped = await this.stopSession(session.id);
+      return stopped.ok
+        ? { type: 'success', content: `已取消创建 ${session.id}。` }
+        : { type: 'error', content: remoteError(stopped) };
+    }
     if (action.action === 'exit') {
       remember(this.closedManualCards, event.messageId, 256);
       return {
@@ -1007,7 +1048,17 @@ export class AssistantDaemon {
       };
     }
     const current = this.screen ?? screen;
-    if (action.manualMode !== 'explicit' && safeStructuredInteraction(current)) {
+    const latest = this.state.sessions?.[session.id];
+    if (latest?.startupRecovery?.phase === 'picker') {
+      const picker = await this.readResumePicker(latest);
+      if (picker) return { type: 'resume-picker', content: '请选择要恢复的历史 Session。', session: latest, picker };
+    }
+    if (session.startupRecovery && !latest?.startupRecovery) {
+      return latest
+        ? { type: 'session-created', content: remoteStartSuccess(latest), session: latest }
+        : { type: 'error', content: '启动终端已退出，请查看 /sessions。' };
+    }
+    if (!latest?.startupRecovery && action.manualMode !== 'explicit' && safeStructuredInteraction(current)) {
       await this.gateway?.sendChoice(event.chatId, session.paneId, current, session.agent);
       return {
         type: 'manual', content: '已恢复结构化识别。',
@@ -1016,7 +1067,7 @@ export class AssistantDaemon {
     }
     return {
       type: 'manual', content: `${operation}已执行。`,
-      view: this.manualView(session, current, 'active', undefined, operation, action.manualMode),
+      view: this.manualView(latest ?? session, current, 'active', undefined, operation, action.manualMode),
     };
   }
 
@@ -1063,6 +1114,7 @@ export class AssistantDaemon {
     this.pendingStartupConflicts.delete(requestedSessionId);
     const result = await this.startRemoteSession({ ...pending.request, resume: undefined });
     if (!result.ok) return larkStartupError(result.error, pending.request);
+    if (result.state === 'manual') return this.startupManualResult(result.session);
     if (result.state !== 'ready') return { type: 'error', content: '启动新会话时出现了意外恢复状态，请重试。' };
     return { type: 'session-created', content: remoteStartSuccess(result.session), session: result.session };
   }
@@ -1079,8 +1131,21 @@ export class AssistantDaemon {
 
   private async handleResumePickerAction(action: SignedAction): Promise<LarkActionResult> {
     const sessionId = action.sessionId ?? '';
-    const request = this.pendingResumePickers.get(sessionId);
+    if (this.startupOperations.has(sessionId)) return { type: 'error', content: 'Session 正在恢复，请稍候。' };
+    this.startupOperations.add(sessionId);
+    try {
+      return await this.handleResumePickerActionCore(action);
+    } finally {
+      this.startupOperations.delete(sessionId);
+    }
+  }
+
+  private async handleResumePickerActionCore(action: SignedAction): Promise<LarkActionResult> {
+    const sessionId = action.sessionId ?? '';
     const session = this.state.sessions?.[sessionId];
+    const request = this.pendingResumePickers.get(sessionId) ?? (session?.startupRecovery
+      ? { sessionId, agent: session.agent, cwd: session.cwd, resume: session.startupRecovery.resume }
+      : undefined);
     if (!request || !session || session.agent !== action.agent || session.paneId !== action.paneId) {
       return { type: 'error', content: 'Resume Picker 已变化，请重新创建 Session。' };
     }
@@ -1094,7 +1159,13 @@ export class AssistantDaemon {
     let picker = await this.readResumePicker(session);
     if (!picker) {
       this.pendingResumePickers.delete(sessionId);
-      return { type: 'error', content: '原生 Resume Picker 当前无法安全识别，已允许手动遥控兜底；请发送 /manual。' };
+      const pane = await this.tmux.inspect(session.paneId);
+      if (!pane || pane.dead) {
+        await this.stopSession(session.id);
+        return { type: 'error', content: '启动终端已退出，请查看 /sessions。' };
+      }
+      const manual = await this.setStartupPhase(session, 'manual');
+      return this.startupManualResult(manual);
     }
     if (action.action !== 'refresh' && picker.fingerprint !== action.fingerprint) {
       return { type: 'resume-picker', content: 'Picker 已变化，已刷新为最新内容。', session, picker };
@@ -1124,8 +1195,13 @@ export class AssistantDaemon {
           if (!pane || pane.dead) throw await this.startupExitedError(session, pane);
           await this.tmux.sendKey(session.paneId, 'Enter', context.signal);
           this.pendingResumePickers.delete(sessionId);
+          await this.setStartupPhase(session, 'identity');
           const claimed = await this.waitForInitialAgentSessionClaim(restoringSession, pane.pid, context.signal);
-          if (!claimed.ok) throw daemonResultAppError(claimed);
+          if (!claimed.ok) {
+            if (claimed.errorCode !== 'AGENT_IDENTITY_TIMEOUT') throw daemonResultAppError(claimed);
+            await this.setStartupPhase(this.state.sessions?.[sessionId] ?? session, 'manual');
+            return;
+          }
           if (restoringSession.agentSessionId) {
             const persisted = await this.handleAgentSessionStarted({
               sessionId,
@@ -1140,9 +1216,26 @@ export class AssistantDaemon {
         });
         return session;
       },
-      async (_context, error) => this.cleanupStartTransaction(sessionId, session.sessionName, error),
+      async (_context, error) => {
+        // The terminal is already committed and controllable. A timeout or
+        // transient inspection failure must not destroy an interactive resume.
+        let pane;
+        try {
+          pane = await this.tmux.inspect(session.paneId);
+        } catch {
+          await this.setStartupPhase(this.state.sessions?.[sessionId] ?? session, 'manual');
+          return;
+        }
+        if (pane && !pane.dead && error.code !== 'AGENT_SESSION_IN_USE') {
+          await this.setStartupPhase(this.state.sessions?.[sessionId] ?? session, 'manual');
+        } else {
+          await this.cleanupStartTransaction(sessionId, session.sessionName, error);
+        }
+      },
     );
     if (!restored.ok) {
+      const retained = this.state.sessions?.[sessionId];
+      if (retained?.startupRecovery?.phase === 'manual') return this.startupManualResult(retained);
       const failed = fail(restored.error);
       if (restored.error.code === 'AGENT_SESSION_IN_USE') {
         const ownerSessionId = typeof restored.error.context.ownerSessionId === 'string'
@@ -1161,10 +1254,11 @@ export class AssistantDaemon {
       }
       return larkStartupError(failed, request);
     }
-    const selected = await this.useSession(sessionId);
-    if (!selected.ok) return { type: 'error', content: remoteError(selected) };
+    const latest = this.state.sessions?.[sessionId];
+    if (!latest) return { type: 'error', content: '启动终端已退出，请查看 /sessions。' };
+    if (latest.startupRecovery) return this.startupManualResult(latest);
     await this.rememberSessionWorkspace(session.cwd);
-    return { type: 'session-created', content: remoteStartSuccess(session), session };
+    return { type: 'session-created', content: remoteStartSuccess(latest), session: latest };
   }
 
   private async readResumePicker(session: ManagedSession, signal?: AbortSignal): Promise<ResumePickerView | undefined> {
@@ -1174,11 +1268,34 @@ export class AssistantDaemon {
     return parseResumePicker(raw, session.agent);
   }
 
+  private async readStartupScreen(session: ManagedSession, signal?: AbortSignal): Promise<ScreenDetection | undefined> {
+    const pane = await this.tmux.inspect(session.paneId, signal);
+    if (!pane || pane.dead) return undefined;
+    const raw = await this.tmux.capture(session.paneId, 160, signal);
+    return getAgentAdapter(session.agent).detectScreen(raw, true, { x: pane.cursorX, y: pane.cursorY });
+  }
+
+  private async waitForNewSessionPrompt(session: ManagedSession, timeoutMs: number, signal?: AbortSignal): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (signal?.aborted) throw signal.reason;
+      const screen = await this.readStartupScreen(session, signal);
+      if (!screen) throw await this.startupExitedError(session);
+      if (newSessionPromptReady(screen)) return true;
+      await abortableDelay(100, signal);
+    }
+    // The process must still be alive before committing a manual startup.
+    const pane = await this.tmux.inspect(session.paneId, signal);
+    if (!pane || pane.dead) throw await this.startupExitedError(session, pane);
+    return false;
+  }
+
   private async handleResumePickerDeliveryFailure(candidate: ManagedSession): Promise<void> {
     const current = this.state.sessions?.[candidate.id];
-    if (!current || current.paneId !== candidate.paneId || !this.pendingResumePickers.has(candidate.id)) return;
-    await this.log(`resume picker delivery failed; rolling back provisional session: session=${candidate.id} pane=${candidate.paneId}`);
-    await this.stopSession(candidate.id);
+    if (!current || current.paneId !== candidate.paneId || !current.startupRecovery) return;
+    await this.log(`resume picker delivery failed; preserving controllable session: session=${candidate.id} pane=${candidate.paneId}`);
+    const manual = await this.setStartupPhase(current, 'manual');
+    await this.sendStartupManual(manual);
   }
 
   private async waitForResumePicker(
@@ -1230,10 +1347,131 @@ export class AssistantDaemon {
       output: tailScreen(screen.normalized, 40),
       capturedAt: new Date(),
       state,
-      notice,
+      notice: notice ?? (session.startupRecovery ? `终端已连接，${startupProgress(session)}。可手动处理提示，或取消创建。` : undefined),
       lastOperation,
       mode,
+      needsConnection: this.state.activeSessionId !== session.id,
     };
+  }
+
+  private async setStartupPhase(session: ManagedSession, phase: 'picker' | 'manual' | 'identity'): Promise<ManagedSession> {
+    const current = this.state.sessions?.[session.id];
+    if (!current || current.paneId !== session.paneId || !current.startupRecovery) return current ?? session;
+    const updated = { ...current, startupRecovery: { ...current.startupRecovery, phase }, updatedAt: Date.now() };
+    this.state = { ...this.state, sessions: { ...this.state.sessions, [session.id]: updated }, updatedAt: Date.now() };
+    if (phase !== 'picker') this.pendingResumePickers.delete(session.id);
+    await this.persistStartupSession(updated);
+    return updated;
+  }
+
+  private async persistStartupSession(session: ManagedSession): Promise<void> {
+    await this.store.saveState(this.state);
+    await this.tmux.writeMetadata(session.sessionName, {
+      managed: true, sessionId: session.id, agent: session.agent, cwd: session.cwd,
+      agentVersion: session.agentVersion, agentSessionId: session.agentSessionId,
+      startupRecovery: session.startupRecovery,
+    });
+  }
+
+  private async startupManualResult(session: ManagedSession): Promise<LarkActionResult> {
+    const pane = await this.tmux.inspect(session.paneId);
+    if (!pane || pane.dead) {
+      await this.reconcileSessions();
+      return { type: 'error', content: '启动终端已退出，请查看 /sessions。' };
+    }
+    const raw = await this.tmux.capture(session.paneId, 160);
+    const screen = getAgentAdapter(session.agent).detectScreen(raw, true, { x: pane.cursorX, y: pane.cursorY });
+    // The form response and watchdog share the same screen-delivery dedup key.
+    remember(this.unresolvedNotified, `${session.id}:${session.paneId}:${screen.fingerprint}`, 256);
+    return {
+      type: 'manual', content: `终端已连接，${startupProgress(session)}，可手动继续。`,
+      view: this.manualView(session, screen, 'active', this.state.activeSessionId === session.id
+        ? undefined : `${startupProgress(session)}。当前连接在其他 Session，请先点击“连接并继续”再操作。`),
+    };
+  }
+
+  private async sendStartupManual(session: ManagedSession): Promise<void> {
+    const chatId = this.state.boundChatId;
+    if (!chatId || !this.gateway) return;
+    try {
+      const result = await this.startupManualResult(session);
+      if (result.type === 'manual') await this.gateway.sendManual(chatId, result.view);
+      else await this.gateway.sendText(chatId, result.content);
+    } catch (error) {
+      await this.log(`resume manual delivery failed: session=${session.id} detail=${errorMessage(error)}`);
+      await this.gateway.sendText(chatId,
+        `Session「${session.id}」终端已保留，${startupProgress(session)}。请通过 /sessions 连接，再发送 /manual。`,
+      ).catch(() => undefined);
+    }
+  }
+
+  private async refreshStartupRecovery(): Promise<void> {
+    if (this.startupRefreshInFlight) return this.startupRefreshInFlight;
+    const operation = this.refreshStartupRecoveryCore();
+    this.startupRefreshInFlight = operation;
+    try { await operation; }
+    finally { if (this.startupRefreshInFlight === operation) this.startupRefreshInFlight = undefined; }
+  }
+
+  private async refreshStartupRecoveryCore(): Promise<void> {
+    for (const candidate of Object.values(this.state.sessions ?? {})) {
+      if (!candidate.startupRecovery || this.startupOperations.has(candidate.id)) continue;
+      const pane = await this.tmux.inspect(candidate.paneId);
+      if (!pane || pane.dead) continue;
+      if (!candidate.startupRecovery.resume) {
+        const screen = await this.readStartupScreen(candidate);
+        if (!screen || !newSessionPromptReady(screen) || this.state.sessions?.[candidate.id] !== candidate
+          || this.startupOperations.has(candidate.id)) continue;
+        const agentSessionId = await this.resolvePaneNativeAgentSessionId(candidate);
+        if (agentSessionId) {
+          await this.handleAgentSessionStarted({
+            sessionId: candidate.id, agent: candidate.agent, cwd: candidate.cwd,
+            agentSessionId, source: 'startup-prompt',
+          });
+        } else {
+          // New CLI sessions may not allocate a native ID until the first
+          // prompt. A recognized empty input prompt is sufficient to proceed.
+          await this.completeNewSessionStartup(candidate);
+        }
+        continue;
+      }
+      const picker = await this.readResumePicker(candidate);
+      if (this.state.sessions?.[candidate.id] !== candidate || this.startupOperations.has(candidate.id)) continue;
+      if (picker) {
+        const session = candidate.startupRecovery.phase === 'picker'
+          ? candidate : await this.setStartupPhase(candidate, 'picker');
+        if (!session.startupRecovery || this.state.sessions?.[session.id] !== session) continue;
+        this.pendingResumePickers.set(session.id, {
+          sessionId: session.id, agent: session.agent, cwd: session.cwd, resume: session.startupRecovery!.resume,
+        });
+        if (this.state.boundChatId && this.gateway
+          && this.deliveredResumePickers.get(session.id) !== picker.fingerprint) {
+          this.deliveredResumePickers.set(session.id, picker.fingerprint);
+          try {
+            await this.gateway.sendResumePicker(this.state.boundChatId, session, picker);
+          } catch {
+            await this.handleResumePickerDeliveryFailure(session);
+          }
+        }
+      } else if (candidate.startupRecovery.phase === 'picker') {
+        const session = await this.setStartupPhase(candidate, 'manual');
+        if (this.state.activeSessionId === session.id) await this.sendStartupManual(session);
+      }
+    }
+  }
+
+  private async completeNewSessionStartup(session: ManagedSession): Promise<void> {
+    const current = this.state.sessions?.[session.id];
+    if (current !== session || !current.startupRecovery || current.startupRecovery.resume) return;
+    const updated = { ...current, startupRecovery: undefined, updatedAt: Date.now() };
+    this.state = { ...this.state, sessions: { ...this.state.sessions, [session.id]: updated }, updatedAt: Date.now() };
+    await this.persistStartupSession(updated);
+    await this.tmux.preserveOnExit(session.sessionName, false);
+    await this.rememberSessionWorkspace(session.cwd);
+    if (!this.startupOperations.has(session.id) && this.state.boundChatId) {
+      await this.gateway?.sendText(this.state.boundChatId, remoteStartSuccess(updated))
+        .catch((error) => this.log(`startup completion notification failed: ${errorMessage(error)}`));
+    }
   }
 
   private async executeManualCommand(
@@ -1585,13 +1823,17 @@ export class AssistantDaemon {
     const sessions = { ...this.state.sessions };
     delete sessions[sessionId];
     this.pendingResumePickers.delete(sessionId);
+    this.deliveredResumePickers?.delete(sessionId);
     this.pendingStartupConflicts.delete(sessionId);
     for (const [pendingId, conflict] of this.pendingStartupConflicts) {
       if (conflict.ownerSessionId === sessionId) this.pendingStartupConflicts.delete(pendingId);
     }
     const wasActive = this.state.activeSessionId === sessionId;
+    const removed = this.state.sessions?.[sessionId];
     const activeSessionId = wasActive
-      ? Object.keys(sessions)[0]
+      ? removed?.startupRecovery
+        ? startupRollbackTarget(this.state, removed, sessions)
+        : Object.keys(sessions)[0]
       : this.state.activeSessionId;
     this.state = {
       ...this.state,
@@ -1610,6 +1852,27 @@ export class AssistantDaemon {
       this.unresolvedNotified.clear();
     }
     await this.store.saveState(this.state);
+    if (wasActive && removed?.startupRecovery) await this.notifyStartupRollback(activeSessionId);
+  }
+
+  private async notifyStartupRollback(target?: string): Promise<void> {
+    const chatId = this.state.boundChatId;
+    if (!chatId || !this.gateway) return;
+    const session = target ? this.state.sessions?.[target] : undefined;
+    const pane = session ? await this.tmux.inspect(session.paneId).catch(() => undefined) : undefined;
+    if (session && pane && !pane.dead) {
+      const raw = await this.tmux.capture(session.paneId, 160).catch(() => '');
+      if (this.state.activeSessionId !== target) return;
+      this.updateScreen(getAgentAdapter(session.agent).detectScreen(raw, true, { x: pane.cursorX, y: pane.cursorY }));
+      await this.gateway.sendText(chatId, `新 Session 未完成创建，已恢复连接到「${session.id}」。`)
+        .catch((error) => this.log(`resume rollback notification failed: ${errorMessage(error)}`));
+    } else {
+      if (this.state.activeSessionId !== target) return;
+      this.state = { ...this.state, activeSessionId: undefined, updatedAt: Date.now() };
+      await this.store.saveState(this.state);
+      await this.gateway.sendText(chatId, '新 Session 未完成创建，原 Session 已不可用，请重新选择连接。').catch(() => undefined);
+      await this.gateway.sendSessionPicker(chatId, Object.values(this.state.sessions ?? {}), undefined).catch(() => undefined);
+    }
   }
 
   private async clearSessionExitEvent(sessionId: string, before: number): Promise<void> {
@@ -1693,6 +1956,8 @@ export class AssistantDaemon {
     const paneId = session?.paneId;
     if (!paneId) {
       await this.reconcileSessions();
+      await this.refreshStartupRecovery();
+      await this.refreshNativeAgentSessionClaims();
       return;
     }
     const pane = await this.tmux.inspect(paneId);
@@ -1712,6 +1977,7 @@ export class AssistantDaemon {
     await this.maybeNotifyCompletion();
     await this.flushPending();
     await this.reconcileSessions();
+    await this.refreshStartupRecovery();
     await this.refreshNativeAgentSessionClaims();
   }
 
@@ -1744,6 +2010,7 @@ export class AssistantDaemon {
     const screen = this.screen;
     const session = this.activeSession();
     if (this.interactionNotificationsSuppressed > 0 || !screen || !session || !this.gateway || !this.state.boundChatId
+      || session.startupRecovery
       || this.pendingResumePickers?.has(session.id)
       || (screen.state !== 'input' && screen.state !== 'unknown') || safeStructuredInteraction(screen)) {
       this.unresolvedCandidate = undefined;
@@ -1809,6 +2076,18 @@ export class AssistantDaemon {
       );
       return { ok: true };
     }
+    if (session.startupRecovery?.phase === 'picker'
+      || (session.startupRecovery?.phase === 'manual' && await this.readResumePicker(session))) {
+      this.pendingAgentSessionClaims.set(candidate.sessionId, candidate);
+      return { ok: true };
+    }
+    if (session.startupRecovery && !session.startupRecovery.resume) {
+      const screen = await this.readStartupScreen(session);
+      if (!screen || !newSessionPromptReady(screen)) {
+        this.pendingAgentSessionClaims.set(candidate.sessionId, candidate);
+        return { ok: true };
+      }
+    }
     if (session.agentSessionId) {
       this.pendingAgentSessionClaims.delete(session.id);
       if (session.agentSessionId !== candidate.agentSessionId) {
@@ -1862,13 +2141,19 @@ export class AssistantDaemon {
     session: ManagedSession,
     candidate: AgentSessionStartedCandidate,
   ): Promise<DaemonResult> {
-    const updated = { ...session, agentSessionId: candidate.agentSessionId, updatedAt: Date.now() };
+    const current = this.state.sessions?.[session.id];
+    if (!current || current.paneId !== session.paneId || current.agentSessionId) return { ok: true };
+    session = current;
+    const recovering = Boolean(session.startupRecovery);
+    const updated = { ...session, agentSessionId: candidate.agentSessionId, startupRecovery: undefined, updatedAt: Date.now() };
     this.state = {
       ...this.state,
       sessions: { ...this.state.sessions, [session.id]: updated },
       updatedAt: Date.now(),
     };
     this.pendingAgentSessionClaims.delete(session.id);
+    this.pendingResumePickers.delete(session.id);
+    this.deliveredResumePickers?.delete(session.id);
     await this.store.saveState(this.state);
     await this.tmux.writeMetadata(session.sessionName, {
       managed: true,
@@ -1877,16 +2162,26 @@ export class AssistantDaemon {
       cwd: session.cwd,
       agentVersion: session.agentVersion,
       agentSessionId: candidate.agentSessionId,
+      startupRecovery: undefined,
     }).catch((error) => this.log(`failed to persist agent session claim for ${session.id}: ${errorMessage(error)}`));
     await this.log(
       `agent session claimed: session=${session.id} agent=${session.agent} agentSession=${candidate.agentSessionId}`,
     );
+    if (recovering) {
+      await this.tmux.preserveOnExit(session.sessionName, false).catch((error) => this.log(`resume preservation cleanup failed: ${errorMessage(error)}`));
+      await this.rememberSessionWorkspace(session.cwd);
+      if (!this.startupOperations.has(session.id) && this.state.boundChatId) {
+        await this.gateway?.sendText(this.state.boundChatId, remoteStartSuccess(updated))
+          .catch((error) => this.log(`resume completion notification failed: ${errorMessage(error)}`));
+      }
+    }
     return { ok: true };
   }
 
   private async refreshNativeAgentSessionClaims(): Promise<void> {
     for (const session of Object.values(this.state.sessions ?? {})) {
       if (session.agentSessionId) continue;
+      if (session.startupRecovery?.phase === 'picker' || this.startupOperations?.has(session.id)) continue;
       const agentSessionId = await this.resolvePaneNativeAgentSessionId(session);
       if (!agentSessionId) continue;
       await this.handleAgentSessionStarted({
@@ -2109,23 +2404,39 @@ export class AssistantDaemon {
   }
 
   private async reconcileSessions(discover = false, signal?: AbortSignal): Promise<ManagedSession[]> {
+    const input = this.state;
     const previousActive = this.state.activeSessionId;
-    const result = await this.reconciler.reconcile(this.state, discover, signal);
+    const result = await this.reconciler.reconcile(input, discover, signal);
+    // Inspection can overlap a user switch, claim, or creation. A later poll
+    // can retry reconciliation; applying this stale snapshot would undo it.
+    if (this.state !== input) return Object.values(this.state.sessions ?? {});
     if (!result.changed) return result.liveSessions;
     const activeChanged = result.state.activeSessionId !== previousActive;
+    const previousScreenState = this.previousScreen?.state;
+    // Commit before logging/notifying: either can yield to an explicit switch.
+    this.state = result.state;
+    if (activeChanged) {
+      this.screen = undefined;
+      this.previousScreen = undefined;
+      this.completedEvents.clear();
+      this.clearPendingCompletion();
+      this.pendingMessages.length = 0;
+      this.pendingInteractionInput = undefined;
+      this.unresolvedCandidate = undefined;
+      this.unresolvedNotified.clear();
+    }
     if (result.removedActive) {
       await this.log(
         `session removed: session=${result.removedActive.id} agent=${result.removedActive.agent} pane=${result.removedActive.paneId} wasActive=true nextActive=${result.state.activeSessionId ?? '-'}`,
       );
     }
     if (activeChanged && result.removedActive
-      && this.previousScreen?.state !== 'exited' && this.state.boundChatId) {
+      && previousScreenState !== 'exited' && this.state.boundChatId) {
       await this.gateway?.sendText(
         this.state.boundChatId,
         `${getAgentAdapter(result.removedActive.agent).displayName}/tmux pane 已退出。`,
       ).catch((error) => this.log(`exit notification failed: ${errorMessage(error)}`));
     }
-    this.state = result.state;
     for (const removed of result.removedSessions) {
       const exitStatus = removed.pane?.exitStatus;
       if (exitStatus === undefined || exitStatus === 0) continue;
@@ -2145,29 +2456,42 @@ export class AssistantDaemon {
     for (const sessionId of this.pendingResumePickers.keys()) {
       if (!this.state.sessions?.[sessionId]) this.pendingResumePickers.delete(sessionId);
     }
+    for (const sessionId of this.deliveredResumePickers.keys()) {
+      if (!this.state.sessions?.[sessionId]) this.deliveredResumePickers.delete(sessionId);
+    }
     for (const [sessionId, conflict] of this.pendingStartupConflicts) {
       if (!this.state.sessions?.[conflict.ownerSessionId]) this.pendingStartupConflicts.delete(sessionId);
     }
-    if (activeChanged) {
-      this.screen = undefined;
-      this.previousScreen = undefined;
-      this.completedEvents.clear();
-      this.clearPendingCompletion();
-      this.pendingMessages.length = 0;
-      this.pendingInteractionInput = undefined;
-      this.unresolvedCandidate = undefined;
-      this.unresolvedNotified.clear();
-    }
     await this.store.saveState(this.state);
+    if (activeChanged && result.removedActive?.startupRecovery
+      && this.state.connectionRevision === input.connectionRevision) {
+      await this.notifyStartupRollback(result.state.activeSessionId);
+    }
     return result.liveSessions;
   }
 
-  private async useSession(sessionId: string): Promise<DaemonResult> {
-    const session = this.state.sessions?.[sessionId];
+  private async useSession(sessionId: string, temporary = false, expectedRevision?: number): Promise<DaemonResult> {
+    let session = this.state.sessions?.[sessionId];
     if (!session) return fail(new AppError('SESSION_NOT_FOUND', `unknown session: ${sessionId}`, { sessionId }));
     const pane = await this.tmux.inspect(session.paneId);
     if (!pane || pane.dead) return fail(await this.startupExitedError(session, pane));
-    this.state = { ...this.state, activeSessionId: sessionId, updatedAt: Date.now() };
+    const latest = this.state.sessions?.[sessionId];
+    if (!latest || latest.paneId !== session.paneId) {
+      return fail(new AppError('SESSION_NOT_FOUND', '目标 Session 已变化，请重新选择。', { sessionId }));
+    }
+    session = latest;
+    if (temporary && expectedRevision !== undefined && (this.state.connectionRevision ?? 0) !== expectedRevision) {
+      return { ok: true, value: session };
+    }
+    const connectionRevision = (this.state.connectionRevision ?? 0)
+      + (temporary || this.state.activeSessionId !== sessionId ? 1 : 0);
+    if (temporary && session.startupRecovery) {
+      session = { ...session, startupRecovery: { ...session.startupRecovery, activationRevision: connectionRevision } };
+    }
+    this.state = {
+      ...this.state, activeSessionId: sessionId, connectionRevision,
+      sessions: { ...this.state.sessions, [sessionId]: session }, updatedAt: Date.now(),
+    };
     this.screen = undefined;
     this.previousScreen = undefined;
     this.completedEvents.clear();
@@ -2177,6 +2501,7 @@ export class AssistantDaemon {
     this.unresolvedCandidate = undefined;
     this.unresolvedNotified.clear();
     await this.store.saveState(this.state);
+    if (temporary && session.startupRecovery) await this.persistStartupSession(session);
     await this.poll();
     await this.log(`session activated: session=${session.id} agent=${session.agent} pane=${session.paneId}`);
     return { ok: true, value: session };
@@ -2184,12 +2509,27 @@ export class AssistantDaemon {
 
   private async startRemoteSession(
     request: StartSessionRequest,
+  ): ReturnType<AssistantDaemon['startRemoteSessionCore']> {
+    if (this.startupOperations.has(request.sessionId)) return { ok: false, error: fail(new AppError('SESSION_STARTING', 'Session 正在启动。')) };
+    this.startupOperations.add(request.sessionId);
+    try {
+      return await this.startRemoteSessionCore(request);
+    } finally {
+      this.startupOperations.delete(request.sessionId);
+    }
+  }
+
+  private async startRemoteSessionCore(
+    request: StartSessionRequest,
   ): Promise<
     | { ok: true; state: 'ready'; session: ManagedSession }
+    | { ok: true; state: 'manual'; session: ManagedSession }
     | { ok: true; state: 'picker'; session: ManagedSession; picker: ResumePickerView }
     | { ok: true; state: 'conflict'; request: StartSessionRequest; owner: ManagedSession }
     | { ok: false; error: DaemonResult }
   > {
+    const previous = this.activeSession();
+    const revisionAtStart = this.state.connectionRevision ?? 0;
     await this.log(
       `remote session create requested: session=${request.sessionId} agent=${request.agent} resume=${request.resume?.mode ?? 'new'}`,
     );
@@ -2208,7 +2548,17 @@ export class AssistantDaemon {
       }
       return { ok: false, error: started };
     }
-    const selected = await this.useSession(request.sessionId);
+    const created = this.state.sessions?.[request.sessionId];
+    if (created?.startupRecovery) {
+      const updated = { ...created, startupRecovery: {
+        ...created.startupRecovery, previousSessionId: previous?.id, previousPaneId: previous?.paneId,
+      } };
+      this.state = { ...this.state, sessions: { ...this.state.sessions, [created.id]: updated } };
+      await this.persistStartupSession(updated);
+    }
+    const selected: DaemonResult = (this.state.connectionRevision ?? 0) === revisionAtStart
+      ? await this.useSession(request.sessionId, true, revisionAtStart)
+      : { ok: true, value: this.state.sessions?.[request.sessionId] };
     if (!selected.ok) {
       await this.log(`remote session activation failed: session=${request.sessionId} code=${selected.errorCode ?? 'UNKNOWN'}`);
       return { ok: false, error: selected };
@@ -2218,12 +2568,11 @@ export class AssistantDaemon {
       const picker = (started.value as { resumePicker?: ResumePickerView }).resumePicker;
       if (picker) {
         this.pendingResumePickers.set(session.id, request);
+        this.deliveredResumePickers.set(session.id, picker.fingerprint);
         return { ok: true, state: 'picker', session, picker };
       }
-      await this.tmux.preserveOnExit(session.sessionName, false).catch((error) => this.log(
-        `failed to disable remain-on-exit after resume picker fallback: session=${session.id} error=${errorMessage(error)}`,
-      ));
     }
+    if (session.startupRecovery) return { ok: true, state: 'manual', session };
     return { ok: true, state: 'ready', session };
   }
 
