@@ -2,6 +2,7 @@ import type { AgentId } from '../agents/types.js';
 import type { ManagedSession, SessionState } from '../core/model.js';
 import type { TmuxInspectResult, TmuxPane, TmuxSessionMetadata } from '../tmux/types.js';
 import { validSessionId } from './start-request.js';
+import { startupRollbackTarget } from './startup-recovery.js';
 
 export interface SessionTmux {
   inspectStatus(paneId: string, signal?: AbortSignal): Promise<TmuxInspectResult>;
@@ -84,8 +85,11 @@ export class SessionReconciler {
       changed = await this.discover(sessions, signal) || changed;
     }
 
+    const removedActiveSession = input.activeSessionId ? input.sessions?.[input.activeSessionId] : undefined;
     const activeSessionId = input.activeSessionId && sessions[input.activeSessionId]
       ? input.activeSessionId
+      : removedActiveSession?.startupRecovery
+      ? startupRollbackTarget(input, removedActiveSession, sessions)
       : Object.keys(sessions)[0];
     if (activeSessionId !== input.activeSessionId) changed = true;
     const removedActive = input.activeSessionId && !sessions[input.activeSessionId]
@@ -174,6 +178,7 @@ export class SessionReconciler {
       cwd: metadata.cwd,
       agentVersion: metadata.agentVersion,
       agentSessionId: metadata.agentSessionId,
+      startupRecovery: metadata.startupRecovery,
       updatedAt: Date.now(),
     };
   }
@@ -204,6 +209,7 @@ export class SessionReconciler {
       cwd: session.cwd,
       agentVersion: session.agentVersion,
       agentSessionId: session.agentSessionId,
+      startupRecovery: session.startupRecovery,
     }, signal);
   }
 }

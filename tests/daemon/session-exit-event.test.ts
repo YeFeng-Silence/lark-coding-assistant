@@ -3,6 +3,28 @@ import { AssistantDaemon } from '../../src/daemon/server.js';
 import type { ManagedSession, SessionState } from '../../src/core/model.js';
 
 describe('session exit events', () => {
+  it('does not overwrite a user connection change while tmux reconciliation is in flight', async () => {
+    const old = managedSession('old');
+    const chosen = { ...managedSession('chosen'), paneId: '%2' };
+    const daemon = Object.create(AssistantDaemon.prototype) as AssistantDaemon;
+    const internal = daemon as unknown as InternalDaemon;
+    internal.state = state(old);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    internal.reconciler = {
+      reconcile: async () => {
+        await gate;
+        return { state: state(), liveSessions: [], removedSessions: [{ session: old }], removedActive: old, changed: true };
+      },
+    };
+    const pending = internal.reconcileSessions();
+    internal.state = { ...state(chosen), connectionRevision: 2 };
+    release();
+    await pending;
+    expect(internal.state.activeSessionId).toBe('chosen');
+    expect(internal.state.connectionRevision).toBe(2);
+  });
+
   it('persists a non-zero pane exit with a sanitized terminal excerpt', async () => {
     const session = managedSession('resume-target');
     const daemon = Object.create(AssistantDaemon.prototype) as AssistantDaemon;
@@ -23,6 +45,7 @@ describe('session exit events', () => {
     };
     internal.store = { saveState: async () => undefined };
     internal.pendingResumePickers = new Map();
+    internal.deliveredResumePickers = new Map();
     internal.pendingStartupConflicts = new Map();
     internal.completedEvents = new Set();
     internal.pendingMessages = [];
@@ -75,6 +98,7 @@ interface InternalDaemon {
   };
   store: { saveState(state: SessionState): Promise<void> };
   pendingResumePickers: Map<string, unknown>;
+  deliveredResumePickers: Map<string, string>;
   pendingStartupConflicts: Map<string, { ownerSessionId: string }>;
   completedEvents: Set<string>;
   pendingMessages: string[];

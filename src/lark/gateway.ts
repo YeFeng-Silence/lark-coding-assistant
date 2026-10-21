@@ -204,7 +204,7 @@ export class LarkGateway implements RemoteGateway {
   }
 
   private async handleDeferredCardAction(event: CardActionEvent, action: SignedAction): Promise<void> {
-    let initialResumePicker: ManagedSession | undefined;
+    let resumeDeliverySession: ManagedSession | undefined;
     try {
       if (action.kind === 'session-create' && action.action === 'submit') {
         await this.updateCardAfterAction(event.messageId, sessionCreateProgressCard());
@@ -236,7 +236,7 @@ export class LarkGateway implements RemoteGateway {
         return;
       }
       if (result.type === 'resume-picker') {
-        if (action.kind === 'session-create') initialResumePicker = result.session;
+        if (result.session.startupRecovery || action.kind === 'session-create') resumeDeliverySession = result.session;
         await this.updateCardAfterAction(event.messageId, resumePickerCard(event.chatId, result.session, result.picker, this.signer));
         return;
       }
@@ -288,6 +288,7 @@ export class LarkGateway implements RemoteGateway {
         return;
       }
       if (result.type === 'manual') {
+        if (result.view.session.startupRecovery) resumeDeliverySession = result.view.session;
         await this.updateCardAfterAction(event.messageId, manualControlCard(event.chatId, result.view, this.signer));
         this.rememberManualFormActions(event.messageId, event.chatId, result.view);
         return;
@@ -299,15 +300,17 @@ export class LarkGateway implements RemoteGateway {
       await this.updateCardAfterAction(event.messageId, handledActionCard(action, result.content));
     } catch (error) {
       const detail = cardErrorDetail(error);
-      if (initialResumePicker) {
-        await this.handler.onResumePickerDeliveryFailure?.(initialResumePicker).catch((cleanupError) => {
-          console.error(`[lca] resume picker rollback failed: session=${initialResumePicker?.id} detail=${cardErrorDetail(cleanupError)}`);
+      if (resumeDeliverySession) {
+        await this.handler.onResumePickerDeliveryFailure?.(resumeDeliverySession).catch((cleanupError) => {
+          console.error(`[lca] resume recovery delivery failed: session=${resumeDeliverySession?.id} detail=${cardErrorDetail(cleanupError)}`);
         });
       }
       if (action.kind === 'session-create') this.formActions.delete(event.messageId);
       console.error(`[lca] deferred card action failed: kind=${action.kind} action=${action.action} message=${event.messageId} detail=${detail}`);
       await this.sendMessage(event.chatId, {
-        text: action.kind === 'session-create'
+        text: resumeDeliverySession
+          ? `Session「${resumeDeliverySession.id}」终端已保留，卡片同步失败：${detail}。请通过 /sessions 连接，再发送 /manual。`
+          : action.kind === 'session-create'
           ? `新建 Session 表单打开失败：${detail}。请重新发送 /sessions，或直接使用 /start 命令。`
           : `卡片操作同步失败：${detail}`,
       }).catch(() => undefined);

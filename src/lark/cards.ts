@@ -9,6 +9,7 @@ import type { AgentId } from '../agents/types.js';
 import type { ResumePickerView } from '../screen/resume-picker.js';
 import type { RuntimeStatus } from '../daemon/protocol.js';
 import type { SessionStartupFailure } from '../session/startup-failure.js';
+import { startupProgress } from '../session/startup-recovery.js';
 
 export function choiceCard(
   chatId: string,
@@ -183,6 +184,7 @@ export interface ManualControlView {
   notice?: string;
   lastOperation?: string;
   mode?: 'explicit' | 'fallback';
+  needsConnection?: boolean;
 }
 
 export const MANUAL_TEXT_FIELD = 'manual_text';
@@ -222,6 +224,7 @@ export function manualControlCard(
   const metadata = [
     `**Session**  \`${escapeInlineCode(view.session.id)}\`  ·  **Agent**  ${escapeMarkdown(agentName)}`,
     `**状态**  \`${view.screen.state}\`  ·  **采集时间**  ${formatHandledAt(view.capturedAt)}`,
+    view.session.startupRecovery ? `**创建进度**  终端已连接，${startupProgress(view.session)}` : undefined,
     view.lastOperation ? `**最近操作**  ${escapeMarkdown(view.lastOperation)}` : undefined,
     view.notice && state !== 'error' ? escapeMarkdown(view.notice) : undefined,
   ].filter(Boolean).join('\n');
@@ -232,6 +235,19 @@ export function manualControlCard(
   ];
   if (state === 'recovered' || state === 'exited') {
     return cardElements(`${view.session.id} · ${agentName} 手动遥控`, elements, state === 'recovered' ? 'green' : 'grey');
+  }
+  if (view.needsConnection && view.session.startupRecovery) {
+    elements.push(buttonRow([
+      actionButton('连接并继续', 'primary', signer.sign({
+        kind: 'session', agent: view.session.agent, action: view.session.id, paneId: view.session.paneId,
+        fingerprint: String(view.session.updatedAt), chatId,
+      })),
+      actionButton('取消创建', 'danger', signer.sign({
+        kind: 'resume-picker', sessionId: view.session.id, agent: view.session.agent,
+        action: 'cancel', paneId: view.session.paneId, fingerprint, chatId,
+      })),
+    ]));
+    return cardElements(`${view.session.id} · ${agentName} 等待连接`, elements, 'orange');
   }
   elements.push(
     manualButtonRow([
@@ -266,6 +282,9 @@ export function manualControlCard(
       manualButton('结束遥控', sign('exit')),
     ]),
   );
+  if (view.session.startupRecovery) {
+    elements.push(manualButtonRow([manualButton('取消创建', sign('cancel-create'), 'danger')]));
+  }
   return cardElements(`${view.session.id} · ${agentName} 手动遥控`, elements, 'orange');
 }
 
@@ -586,6 +605,7 @@ function sessionCard(
       ? `**${escapeMarkdown(session.id)}**  <text_tag color='green'>● 当前连接</text_tag>`
       : `**${escapeMarkdown(session.id)}**`,
     `📁 \`${escapeInlineCode(session.cwd)}\``,
+    ...(session.startupRecovery ? [`⏳ ${startupProgress(session)}，可连接后发送 \`/manual\` 继续，或关闭取消创建。`] : []),
   ].join('\n\n');
   const elements: object[] = [{ tag: 'markdown', content }];
   elements.push(confirmingStop

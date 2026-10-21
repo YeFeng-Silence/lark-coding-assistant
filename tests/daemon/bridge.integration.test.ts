@@ -81,7 +81,8 @@ if (process.argv.includes('resume') && !process.argv.includes('--last')) {
   console.log('enter resume   esc new   ctrl+c quit   ↑/↓ browse');
 }
 const rl = createInterface({ input: process.stdin });
-process.stdout.write('› ');
+if (sessionId.startsWith('manual-new-')) console.log('Update required. Press Enter to continue.');
+else process.stdout.write('› ');
 rl.on('line', (line) => {
   console.log('RECEIVED:' + line);
   if (line === 'finish without running') {
@@ -309,6 +310,24 @@ rl.on('line', (line) => {
       session_name: 'cardremote', session_agent: 'traex', session_project: root, session_resume: 'new',
     });
     expect(cardCreated).toMatchObject({ type: 'session-created', session: { id: 'cardremote', agent: 'traex' } });
+    for (const agent of ['codex', 'traex', 'claude'] as const) {
+      const sessionId = `manual-new-${agent}`;
+      await fake.emit(message(`/start ${sessionId} --agent ${agent} --cwd "${root}"`));
+      const pending = (await store.loadState()).sessions?.[sessionId];
+      expect(pending?.startupRecovery?.phase).toBe('manual');
+      expect(pending?.startupRecovery?.resume).toBeUndefined();
+      const view = fake.manualViews.find(({ session }) => session.id === sessionId);
+      expect(view?.notice).toContain('尚未完成会话创建');
+      const completed = await fake.emitSignedAction({
+        v: 1, kind: 'manual', sessionId, agent, action: 'enter', paneId: pending!.paneId,
+        fingerprint: view!.screen.fingerprint, chatId: 'oc_owner', nonce: sessionId,
+        expiresAt: Date.now() + 60_000, sig: 'test',
+      });
+      expect(completed).toMatchObject({ type: 'session-created', session: { id: sessionId, startupRecovery: undefined } });
+      expect((await store.loadState()).sessions?.[sessionId]?.startupRecovery).toBeUndefined();
+      await requestDaemon(paths.socket, { method: 'stop', sessionId });
+      await requestDaemon(paths.socket, { method: 'useSession', sessionId: 'cardremote' });
+    }
     const legacyLast = await fake.emitSignedFormAction({
       v: 1, kind: 'session-create', agent: 'codex', action: 'submit', paneId: '', fingerprint: 'create',
       chatId: 'oc_owner', nonce: 'legacy-last', expiresAt: Date.now() + 60_000, sig: 'test',
@@ -338,7 +357,12 @@ rl.on('line', (line) => {
     }) as Extract<LarkActionResult, { type: 'resume-picker' }>;
     expect(pickerRollback).toMatchObject({ type: 'resume-picker', session: { id: 'pickerrollback' } });
     await fake.handler?.onResumePickerDeliveryFailure?.(pickerRollback.session);
-    expect((await store.loadState()).sessions?.pickerrollback).toBeUndefined();
+    // Polling may already have recognized the Picker again; delivery failure
+    // must retain the pending terminal and provide a usable manual card.
+    expect((await store.loadState()).sessions?.pickerrollback?.startupRecovery).toBeDefined();
+    expect(fake.manualViews.some(({ session }) => session.id === 'pickerrollback')).toBe(true);
+    await requestDaemon(paths.socket, { method: 'stop', sessionId: 'pickerrollback' });
+    expect((await store.loadState()).activeSessionId).toBe('pickerremote');
 
     const pickerResult = pickerCreated as Extract<LarkActionResult, { type: 'resume-picker' }>;
     const selectedOption = pickerResult.picker.options[0];
@@ -428,7 +452,7 @@ rl.on('line', (line) => {
       return state.sessions?.default === undefined && state.activeSessionId === undefined;
     });
     await waitFor(async () => fake.texts.some(({ text }) => text.includes('codex/tmux pane 已退出')));
-  }, 45_000);
+  }, 60_000);
 });
 
 class FakeGateway implements RemoteGateway {

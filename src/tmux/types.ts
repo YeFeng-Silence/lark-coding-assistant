@@ -1,3 +1,5 @@
+import type { StartupRecovery } from '../core/model.js';
+
 export interface TmuxPane {
   sessionName: string;
   paneId: string;
@@ -24,6 +26,7 @@ export interface TmuxSessionMetadata {
   cwd: string;
   agentVersion: string;
   agentSessionId?: string;
+  startupRecovery?: StartupRecovery;
 }
 
 export interface TmuxCreateOptions {

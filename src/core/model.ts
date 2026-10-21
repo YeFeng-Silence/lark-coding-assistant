@@ -1,4 +1,4 @@
-import type { AgentId } from '../agents/types.js';
+import type { AgentId, AgentResume } from '../agents/types.js';
 
 export type Tenant = 'feishu' | 'lark';
 
@@ -29,7 +29,17 @@ export interface ManagedSession {
   cwd: string;
   agentVersion: string;
   agentSessionId?: string;
+  startupRecovery?: StartupRecovery;
   updatedAt: number;
+}
+
+export interface StartupRecovery {
+  phase: 'picker' | 'manual' | 'identity';
+  // Absent for a new session; present when restoring an existing native session.
+  resume?: AgentResume;
+  previousSessionId?: string;
+  previousPaneId?: string;
+  activationRevision?: number;
 }
 
 export interface SessionExitEvent {
@@ -49,6 +59,7 @@ export interface SessionState {
   boundChatId?: string;
   autoBindDisabled?: boolean;
   activeSessionId?: string;
+  connectionRevision?: number;
   sessions?: Record<string, ManagedSession>;
   recentSessionExits?: Record<string, SessionExitEvent>;
   recentWorkspaces?: RecentWorkspace[];

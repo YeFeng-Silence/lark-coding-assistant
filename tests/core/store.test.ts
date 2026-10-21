@@ -6,6 +6,25 @@ import { resolveAppPaths } from '../../src/core/paths.js';
 import { AppStore, createBindCode, hashBindCode, verifyBindCode } from '../../src/core/store.js';
 
 describe('AppStore', () => {
+  it('preserves pending startup and rollback state when loading the earlier resume-only format', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lca-store-startup-'));
+    const store = new AppStore(resolveAppPaths(root));
+    await store.ensure();
+    const recovery = { phase: 'manual', resume: { mode: 'picker' }, previousSessionId: 'previous',
+      previousPaneId: '%1', activationRevision: 4 };
+    await writeFile(store.paths.state, JSON.stringify({
+      schemaVersion: 2, connectionRevision: 4, activeSessionId: 'pending', updatedAt: 1,
+      sessions: { pending: { id: 'pending', agent: 'codex', paneId: '%2', sessionName: 'lca-pending',
+        cwd: '/tmp', agentVersion: 'test', updatedAt: 1, resumeRecovery: recovery } },
+    }));
+    const state = await store.loadState();
+    expect(state.connectionRevision).toBe(4);
+    expect(state.sessions?.pending?.startupRecovery).toEqual(recovery);
+    expect(state.sessions?.pending).not.toHaveProperty('resumeRecovery');
+    await store.saveState(state);
+    expect((await store.loadState()).sessions?.pending?.startupRecovery).toEqual(recovery);
+  });
+
   it('persists secrets with owner-only permissions', async () => {
     const root = await mkdtemp(join(tmpdir(), 'lca-store-'));
     const store = new AppStore(resolveAppPaths(root));

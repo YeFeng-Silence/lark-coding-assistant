@@ -51,6 +51,15 @@ describe.runIf(await hasTmux())('TmuxController integration', () => {
         agentVersion: 'test-version',
         agentSessionId: 'native-session',
       });
+      const startupRecovery = {
+        phase: 'manual' as const, resume: { mode: 'picker' as const }, previousSessionId: 'previous',
+        previousPaneId: '%1', activationRevision: 4,
+      };
+      const metadata = (await tmux.readMetadata(sessionName))!;
+      await tmux.writeMetadata(sessionName, { ...metadata, startupRecovery });
+      expect((await tmux.readMetadata(sessionName))?.startupRecovery).toEqual(startupRecovery);
+      await tmux.writeMetadata(sessionName, metadata);
+      expect((await tmux.readMetadata(sessionName))?.startupRecovery).toBeUndefined();
       await waitFor(async () => (await tmux.capture(pane.paneId, 30)).includes('HOOK_SESSION:tmux-test-session'));
       await tmux.sendText(pane.paneId, 'hello from remote');
       await waitFor(async () => (await tmux.capture(pane.paneId, 30)).includes('RECEIVED:hello from remote'));

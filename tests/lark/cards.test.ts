@@ -7,6 +7,29 @@ import { detectClaudeScreen, detectCodexScreen, detectTraeScreen } from '../../s
 describe('CardKit 2 cards', () => {
   const signer = new ActionSigner('secret');
 
+  it('uses new-session progress text for a manual startup without resume', () => {
+    const serialized = JSON.stringify(manualControlCard('oc_1', {
+      session: { id: 'pending', agent: 'codex', sessionName: 'lca-pending', paneId: '%4', cwd: '/work',
+        agentVersion: 'test', updatedAt: 1, startupRecovery: { phase: 'manual' } },
+      screen: detectCodexScreen('Update required', true), output: 'Update required', capturedAt: new Date(),
+    }, signer));
+    expect(serialized).toContain('尚未完成会话创建');
+    expect(serialized).toContain('取消创建');
+    expect(serialized).not.toContain('Resume');
+  });
+
+  it.each([false, true])('shows pending resume progress and cancellation with needsConnection=%s', (needsConnection) => {
+    const serialized = JSON.stringify(manualControlCard('oc_1', {
+      session: { id: 'pending', agent: 'claude', sessionName: 'lca-pending', paneId: '%4', cwd: '/work',
+        agentVersion: 'test', updatedAt: 1, startupRecovery: { phase: 'manual', resume: { mode: 'picker' } } },
+      screen: detectClaudeScreen('Update required', true), output: 'Update required', capturedAt: new Date(), needsConnection,
+    }, signer));
+    expect(serialized).toContain('尚未完成 Resume');
+    expect(serialized).toContain('取消创建');
+    expect(serialized.includes('连接并继续')).toBe(needsConnection);
+    expect(serialized.includes('输入并提交')).toBe(!needsConnection);
+  });
+
   it('places approval buttons directly in body.elements', () => {
     const screen: ScreenDetection = {
       state: 'approval', confidence: 0.9, normalized: '', fingerprint: 'fp',

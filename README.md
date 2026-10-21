@@ -82,7 +82,7 @@ lca start --name docs --agent claude --cwd ~/workspace/docs
 
 名称只允许字母、数字、下划线和短横线，最长 40 个字符。不指定名称时使用 `default`。
 
-Session 创建和恢复有 30 秒启动事务；超时会清理临时 tmux/state，并返回失败阶段与最近终端输出。Resume Picker 等待选择不计时，提交选择后重新开始 30 秒恢复事务。该限制不影响消息、交互、`status`、`tail`、`attach`、`stop` 或 daemon 管理。
+Session 创建和恢复有 30 秒启动事务；未完成登记的启动超时会清理临时 tmux/state，并返回失败阶段与最近终端输出。飞书新会话和 Resume 终端已登记后，等待选择或人工处理不计时；恢复确认遇到超时但终端仍存活时，会保留终端供手动接管。该限制不影响消息、交互、`status`、`tail`、`attach`、`stop` 或 daemon 管理。
 
 一个 PersonalAgent 私聊同一时刻只连接一个 active session。在飞书发送：
 
@@ -139,7 +139,9 @@ lca start --agent codex --resume-all
 
 `--name` 是 bridge 管理的 tmux session 名；`--resume <session-id>` 是 coding agent 自己的历史 session ID，两者不是同一个概念。claude 的 `--resume-all` 与 `--resume` 都会打开其原生恢复选择器。
 
-飞书只提供“新会话”和原生 Resume Picker。Picker 会被解析为卡片，不要求手输历史 ID，也不会进入手动遥控；仅存在未展示候选项时才显示翻页。启动结果、session 列表、状态与失败提示统一显示绝对路径；Picker 失败卡仍提供“新建 Session”和“查看 Sessions”。
+飞书只提供“新会话”和原生 Resume Picker。已识别的 Picker 会被解析为选择卡；仅存在未展示候选项时才显示翻页。Codex、TraeX、Claude Code 在新建或恢复时遇到升级、登录、信任提示、未知界面或额外交互，会先连接存活终端并提供 manual 卡，分别显示“尚未完成会话创建”或“尚未完成 Resume”。可直接按键或输入完成交互。新会话进入正常输入界面后完成创建，原生 ID 可在首次消息后补齐；恢复已有会话仍要求确认原生 Session 身份。卡片失效或发送失败时，通过 `/sessions` 连接，再发送 `/manual`。
+
+等待恢复期间可以“取消创建”或关闭新 Session。失败或取消时，若当前连接仍是创建时的临时连接，会自动切回原 Session；用户期间主动切换过则保留用户选择。原 Session 已退出时提供 Session 列表。待完成进度和回退目标会保留到 daemon 重启后。
 
 ## 本地终端与 tmux
 
