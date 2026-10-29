@@ -196,6 +196,22 @@ export function manualControlCard(
   view: ManualControlView,
   signer: ActionSigner,
 ): object {
+  if (view.session.startupRecovery?.phase === 'interrupted') {
+    const recovery = view.session.startupRecovery;
+    const action = (value: string) => signer.sign({ kind: 'manual', manualMode: 'fallback', sessionId: view.session.id,
+      agent: view.session.agent, paneId: view.session.paneId, fingerprint: String(view.session.updatedAt),
+      action: value, chatId }, 24 * 60 * 60_000);
+    return cardElements(`${view.session.id} · 启动中断`, [
+      { tag: 'markdown', content: `进程已退出，创建记录已保留。\n退出码：${recovery.exitStatus ?? '未知'}` },
+      ...(view.notice ? [{ tag: 'markdown', content: escapeMarkdown(view.notice) }] : []),
+      { tag: 'markdown', content: `\`\`\`text\n${escapeFence(recovery.terminalOutput ?? '终端已不可用，未能获取退出前输出。').slice(-5000)}\n\`\`\`` },
+      buttonRow([
+        actionButton('重新启动', 'primary', action('retry-create')),
+        actionButton('查看终端', 'default', action('view-startup')),
+        actionButton('取消创建', 'danger', action('cancel-create')),
+      ]),
+    ], 'orange');
+  }
   const state = view.state ?? 'active';
   const mode = view.mode ?? 'fallback';
   const agentName = getAgentAdapter(view.session.agent).displayName;
@@ -605,7 +621,7 @@ function sessionCard(
       ? `**${escapeMarkdown(session.id)}**  <text_tag color='green'>● 当前连接</text_tag>`
       : `**${escapeMarkdown(session.id)}**`,
     `📁 \`${escapeInlineCode(session.cwd)}\``,
-    ...(session.startupRecovery ? [`⏳ ${startupProgress(session)}，可连接后发送 \`/manual\` 继续，或关闭取消创建。`] : []),
+    ...(session.startupRecovery?.phase === 'interrupted' ? ['⏳ 启动中断，可点击连接查看恢复操作，或关闭取消创建。'] : session.startupRecovery ? [`⏳ ${startupProgress(session)}，可连接后发送 \`/manual\` 继续，或关闭取消创建。`] : []),
   ].join('\n\n');
   const elements: object[] = [{ tag: 'markdown', content }];
   elements.push(confirmingStop

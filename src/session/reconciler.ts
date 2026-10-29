@@ -45,6 +45,7 @@ export class SessionReconciler {
     let changed = false;
     for (const [id, session] of Object.entries(sessions)) {
       if (signal?.aborted) throw signal.reason;
+      if (session.startupRecovery?.phase === 'interrupted') continue;
       const result = await this.confirm(session, signal);
       if (result.status === 'unavailable') {
         await this.log(`tmux inspection unavailable for ${id}: ${errorMessage(result.error)}`);
@@ -63,6 +64,15 @@ export class SessionReconciler {
           void this.log(`failed to capture dead tmux pane ${result.pane.paneId}: ${errorMessage(error)}`);
           return '';
         });
+        if (session.startupRecovery) {
+          sessions[id] = { ...session, startupRecovery: { ...session.startupRecovery,
+            phase: 'interrupted', exitStatus: result.pane.exitStatus, terminalOutput: terminalOutput.slice(-8000),
+          }, updatedAt: Date.now() };
+          removedSessions.push({ session, pane: result.pane, terminalOutput });
+          this.misses.delete(id);
+          changed = true;
+          continue;
+        }
         await this.tmux.killSession(result.pane.sessionName, signal).catch((error) => this.log(
           `failed to clean dead tmux session ${result.pane.sessionName}: ${errorMessage(error)}`,
         ));
@@ -76,7 +86,9 @@ export class SessionReconciler {
       this.misses.set(id, misses);
       if (misses < this.missingThreshold) continue;
       removedSessions.push({ session });
-      delete sessions[id];
+      if (session.startupRecovery) {
+        sessions[id] = { ...session, startupRecovery: { ...session.startupRecovery, phase: 'interrupted' }, updatedAt: Date.now() };
+      } else delete sessions[id];
       this.misses.delete(id);
       changed = true;
     }
@@ -86,19 +98,19 @@ export class SessionReconciler {
     }
 
     const removedActiveSession = input.activeSessionId ? input.sessions?.[input.activeSessionId] : undefined;
-    const activeSessionId = input.activeSessionId && sessions[input.activeSessionId]
+    const activeSessionId = input.activeSessionId && sessions[input.activeSessionId] && sessions[input.activeSessionId]?.startupRecovery?.phase !== 'interrupted'
       ? input.activeSessionId
       : removedActiveSession?.startupRecovery
       ? startupRollbackTarget(input, removedActiveSession, sessions)
-      : Object.keys(sessions)[0];
+      : Object.values(sessions).find((session) => session.startupRecovery?.phase !== 'interrupted')?.id;
     if (activeSessionId !== input.activeSessionId) changed = true;
-    const removedActive = input.activeSessionId && !sessions[input.activeSessionId]
+    const removedActive = input.activeSessionId && (!sessions[input.activeSessionId] || (sessions[input.activeSessionId]?.startupRecovery?.phase === 'interrupted' && removedSessions.some(({ session }) => session.id === input.activeSessionId)))
       ? input.sessions?.[input.activeSessionId]
       : undefined;
     const state = changed
       ? { ...input, sessions, activeSessionId, updatedAt: Date.now() }
       : input;
-    return { state, liveSessions: Object.values(sessions), removedActive, removedSessions, changed };
+    return { state, liveSessions: Object.values(sessions).filter((session) => session.startupRecovery?.phase !== 'interrupted'), removedActive, removedSessions, changed };
   }
 
   private async confirm(session: ManagedSession, signal?: AbortSignal): Promise<TmuxInspectResult> {
@@ -124,6 +136,7 @@ export class SessionReconciler {
       if (signal?.aborted) throw signal.reason;
       if (seen.has(pane.sessionName)) continue;
       seen.add(pane.sessionName);
+      if (Object.values(sessions).some((session) => session.sessionName === pane.sessionName && session.startupRecovery?.phase === 'interrupted')) continue;
       if (pane.dead) {
         if (!liveSessionNames.has(pane.sessionName)) {
           await this.tmux.killSession(pane.sessionName, signal).catch((error) => this.log(

@@ -34,7 +34,9 @@ export interface ManagedSession {
 }
 
 export interface StartupRecovery {
-  phase: 'picker' | 'manual' | 'identity';
+  phase: 'picker' | 'manual' | 'identity' | 'interrupted';
+  exitStatus?: number;
+  terminalOutput?: string;
   // Absent for a new session; present when restoring an existing native session.
   resume?: AgentResume;
   previousSessionId?: string;

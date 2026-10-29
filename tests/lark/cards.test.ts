@@ -7,6 +7,22 @@ import { detectClaudeScreen, detectCodexScreen, detectTraeScreen } from '../../s
 describe('CardKit 2 cards', () => {
   const signer = new ActionSigner('secret');
 
+  it('provides signed recovery actions for an interrupted startup without live terminal input', () => {
+    const card = manualControlCard('oc_1', {
+      session: { id: 'pending', agent: 'codex', sessionName: 'lca-pending', paneId: '%4', cwd: '/work',
+        agentVersion: 'test', updatedAt: 123, startupRecovery: { phase: 'interrupted', exitStatus: 0, terminalOutput: 'Upgrade finished' } },
+      screen: detectCodexScreen('', false), output: '', capturedAt: new Date(), needsConnection: true,
+    }, signer);
+    const serialized = JSON.stringify(card);
+    expect(serialized).toContain('Upgrade finished');
+    expect(serialized).toContain('重新启动');
+    expect(serialized).toContain('查看终端');
+    expect(serialized).toContain('取消创建');
+    expect(serialized).not.toContain('输入并提交');
+    const columns = JSON.parse(serialized).body.elements.at(-1).columns;
+    for (const column of columns) expect(signer.verify(column.elements[0].behaviors[0].value, 'oc_1')).toBeDefined();
+  });
+
   it('uses new-session progress text for a manual startup without resume', () => {
     const serialized = JSON.stringify(manualControlCard('oc_1', {
       session: { id: 'pending', agent: 'codex', sessionName: 'lca-pending', paneId: '%4', cwd: '/work',

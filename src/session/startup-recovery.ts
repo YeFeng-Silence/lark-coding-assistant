@@ -2,6 +2,7 @@ import type { ManagedSession, StartupRecovery, SessionState } from '../core/mode
 import type { ScreenDetection } from '../screen/detector.js';
 
 export function startupProgress(session: ManagedSession): string {
+  if (session.startupRecovery?.phase === 'interrupted') return '启动中断，等待重新启动';
   return session.startupRecovery?.resume ? '尚未完成 Resume' : '尚未完成会话创建';
 }
 
@@ -22,17 +23,19 @@ export function startupRollbackTarget(
     || recovery.activationRevision === undefined
     || recovery.activationRevision !== (state.connectionRevision ?? 0)) return undefined;
   const previous = recovery.previousSessionId ? sessions[recovery.previousSessionId] : undefined;
-  return previous && previous.paneId === recovery.previousPaneId ? previous.id : undefined;
+  return previous && previous.startupRecovery?.phase !== 'interrupted' && previous.paneId === recovery.previousPaneId ? previous.id : undefined;
 }
 
 export function parseStartupRecovery(raw: string | undefined): StartupRecovery | undefined {
   if (!raw) return undefined;
   try {
     const value = JSON.parse(raw) as StartupRecovery;
-    if (!value || !['picker', 'manual', 'identity'].includes(value.phase)) return undefined;
+    if (!value || !['picker', 'manual', 'identity', 'interrupted'].includes(value.phase)) return undefined;
     if (value.resume !== undefined && (!value.resume || !['picker', 'last', 'session'].includes(value.resume.mode))) return undefined;
     if (value.phase === 'picker' && value.resume?.mode !== 'picker') return undefined;
     if (value.resume?.mode === 'session' && typeof value.resume.sessionId !== 'string') return undefined;
+    if (value.terminalOutput !== undefined && typeof value.terminalOutput !== 'string') return undefined;
+    if (value.exitStatus !== undefined && !Number.isInteger(value.exitStatus)) return undefined;
     if (value.previousSessionId !== undefined && typeof value.previousSessionId !== 'string') return undefined;
     if (value.previousPaneId !== undefined && typeof value.previousPaneId !== 'string') return undefined;
     if (value.activationRevision !== undefined && !Number.isSafeInteger(value.activationRevision)) return undefined;
