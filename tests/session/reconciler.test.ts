@@ -22,8 +22,29 @@ describe('SessionReconciler', () => {
       activeSessionId: pending.id, connectionRevision: 8,
     });
     expect(result.state.activeSessionId).toBe('previous');
-    expect(result.state.sessions?.pending).toBeUndefined();
+    expect(result.state.sessions?.pending?.startupRecovery).toMatchObject({ phase: 'interrupted', exitStatus: 7 });
+    expect(tmux.killed).not.toContain(pending.sessionName);
+    expect(result.liveSessions.map((session) => session.id)).not.toContain('pending');
+    const repeated = await new SessionReconciler(tmux).reconcile(JSON.parse(JSON.stringify(result.state)), true);
+    expect(repeated.state.sessions?.pending?.startupRecovery?.phase).toBe('interrupted');
+    expect(repeated.removedSessions).toHaveLength(0);
     expect(result.state.sessions?.first).toBeDefined();
+  });
+
+  it.each(['codex', 'traex', 'claude'] as const)('retains a new %s startup after a successful process exit without changing another connection', async (agent) => {
+    const tmux = new FakeTmux();
+    const pending = { ...session('pending', agent), paneId: '%4', startupRecovery: { phase: 'manual' as const } };
+    const previous = session('previous', agent);
+    const dead = { ...pane(pending.sessionName, pending.paneId, agent), dead: true, exitStatus: 0 };
+    tmux.terminalOutput = 'Update finished';
+    tmux.inspectStatus = async (id) => id === pending.paneId ? { status: 'dead', pane: dead }
+      : { status: 'live', pane: pane(previous.sessionName, previous.paneId, agent) };
+    tmux.inspectSession = async () => ({ status: 'dead', pane: dead });
+    const result = await new SessionReconciler(tmux).reconcile({ schemaVersion: 2,
+      sessions: { previous, pending }, activeSessionId: 'previous', updatedAt: 1 });
+    expect(result.state.activeSessionId).toBe('previous');
+    expect(result.state.sessions?.pending?.startupRecovery).toEqual({ phase: 'interrupted', exitStatus: 0, terminalOutput: 'Update finished' });
+    expect(tmux.killed).toEqual([]);
   });
 
   it('recovers pending resume phase and rollback identity from tmux metadata', async () => {

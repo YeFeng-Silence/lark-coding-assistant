@@ -890,6 +890,7 @@ export class AssistantDaemon {
         || String(target.updatedAt) !== action.fingerprint) {
         return { type: 'error', content: '目标 session 已变化，请重新发送 /sessions。' };
       }
+      if (target.startupRecovery?.phase === 'interrupted') return this.startupManualResult(target);
       const result = await this.useSession(target.id);
       if (result.ok && this.state.sessions?.[target.id]?.startupRecovery) {
         return this.startupManualResult(this.state.sessions[target.id]!);
@@ -994,6 +995,10 @@ export class AssistantDaemon {
 
   private async handleManualAction(action: SignedAction, event: CardActionEvent): Promise<LarkActionResult> {
     await this.poll();
+    const interrupted = action.sessionId ? this.state.sessions?.[action.sessionId] : undefined;
+    if (interrupted?.startupRecovery?.phase === 'interrupted') {
+      return this.handleInterruptedStartupAction(interrupted, action);
+    }
     const session = this.activeSession();
     const screen = this.screen;
     if (!session || !screen || action.sessionId !== session.id || action.agent !== session.agent || action.paneId !== session.paneId) {
@@ -1049,6 +1054,7 @@ export class AssistantDaemon {
     }
     const current = this.screen ?? screen;
     const latest = this.state.sessions?.[session.id];
+    if (latest?.startupRecovery?.phase === 'interrupted') return this.startupManualResult(latest);
     if (latest?.startupRecovery?.phase === 'picker') {
       const picker = await this.readResumePicker(latest);
       if (picker) return { type: 'resume-picker', content: '请选择要恢复的历史 Session。', session: latest, picker };
@@ -1087,6 +1093,7 @@ export class AssistantDaemon {
       return this.sessionPickerActionResult(`已取消关闭 ${target.id}。`);
     }
     if (action.action !== 'confirm') return { type: 'error', content: '无法识别关闭操作，请重新发送 /sessions。' };
+    if (this.startupOperations.has(target.id)) return { type: 'error', content: 'Session 正在启动，请稍候再关闭。' };
     const stopped = await this.stopSession(target.id);
     if (!stopped.ok) return { type: 'error', content: remoteError(stopped) };
     return this.sessionPickerActionResult(`已关闭 ${target.id}。`);
@@ -1373,7 +1380,60 @@ export class AssistantDaemon {
     });
   }
 
+  private async handleInterruptedStartupAction(session: ManagedSession, action: SignedAction): Promise<LarkActionResult> {
+    if (action.agent !== session.agent || action.paneId !== session.paneId
+      || action.fingerprint !== String(session.updatedAt)) return this.startupManualResult(session);
+    if (this.startupOperations.has(session.id)) return { type: 'error', content: 'Session 正在重新启动，请稍候。' };
+    if (action.action === 'view-startup' || action.action === 'refresh') return this.startupManualResult(session);
+    if (action.action === 'cancel-create') {
+      this.startupOperations.add(session.id);
+      try {
+        await this.tmux.killSession(session.sessionName);
+        await this.forgetSessionState(session.id);
+        return { type: 'success', content: `已取消创建 ${session.id}。` };
+      } finally { this.startupOperations.delete(session.id); }
+    }
+    if (action.action !== 'retry-create') return this.startupManualResult(session);
+    this.startupOperations.add(session.id);
+    const connection = { previous: this.activeSession(), revision: this.state.connectionRevision ?? 0 };
+    try {
+      await this.tmux.killSession(session.sessionName);
+      // Keep the saved creation record available for recovery if this attempt fails.
+      await this.forgetSessionState(session.id);
+      const result = await this.startRemoteSessionCore({ sessionId: session.id, agent: session.agent,
+        cwd: session.cwd, resume: session.startupRecovery?.resume }, connection);
+      if (!result.ok) {
+        await this.log(`startup retry failed: session=${session.id} detail=${remoteError(result.error)}`);
+        this.state = { ...this.state, sessions: { ...this.state.sessions,
+          [session.id]: this.state.sessions?.[session.id] ?? { ...session, updatedAt: Date.now() } } };
+        await this.store.saveState(this.state);
+        return this.startupManualResult(this.state.sessions![session.id]!);
+      }
+      if (result.state === 'picker') return { type: 'resume-picker', content: '请选择要恢复的历史 Session。', session: result.session, picker: result.picker };
+      if (result.state === 'manual') return this.startupManualResult(result.session);
+      if (result.state === 'conflict') return { type: 'startup-conflict', content: '目标原生 Session 已连接。', request: result.request, owner: result.owner };
+      return { type: 'session-created', content: remoteStartSuccess(result.session), session: result.session };
+    } catch (error) {
+      if (!this.state.sessions?.[session.id]) {
+        this.state = { ...this.state, sessions: { ...this.state.sessions, [session.id]: session } };
+        await this.store.saveState(this.state);
+      }
+      await this.log(`startup retry failed: session=${session.id} detail=${errorMessage(error)}`);
+      return this.startupManualResult(this.state.sessions![session.id]!);
+    } finally {
+      this.startupOperations.delete(session.id);
+    }
+  }
+
   private async startupManualResult(session: ManagedSession): Promise<LarkActionResult> {
+    if (session.startupRecovery?.phase === 'interrupted') {
+      const screen = getAgentAdapter(session.agent).detectScreen(session.startupRecovery.terminalOutput ?? '', false);
+      return { type: 'manual', content: '进程已退出，创建尚未完成，可重新启动。',
+        view: this.manualView(session, screen, 'active', this.state.activeSessionId
+          ? `当前连接：${this.state.activeSessionId}。创建记录已保留，可点击重新启动继续。`
+          : '当前未连接其他 Session。创建记录已保留，可重新启动或通过 /sessions 选择连接。') };
+    }
+
     const pane = await this.tmux.inspect(session.paneId);
     if (!pane || pane.dead) {
       await this.reconcileSessions();
@@ -1415,7 +1475,7 @@ export class AssistantDaemon {
 
   private async refreshStartupRecoveryCore(): Promise<void> {
     for (const candidate of Object.values(this.state.sessions ?? {})) {
-      if (!candidate.startupRecovery || this.startupOperations.has(candidate.id)) continue;
+      if (!candidate.startupRecovery || candidate.startupRecovery.phase === 'interrupted' || this.startupOperations.has(candidate.id)) continue;
       const pane = await this.tmux.inspect(candidate.paneId);
       if (!pane || pane.dead) continue;
       if (!candidate.startupRecovery.resume) {
@@ -1833,7 +1893,7 @@ export class AssistantDaemon {
     const activeSessionId = wasActive
       ? removed?.startupRecovery
         ? startupRollbackTarget(this.state, removed, sessions)
-        : Object.keys(sessions)[0]
+        : Object.values(sessions).find((session) => session.startupRecovery?.phase !== 'interrupted')?.id
       : this.state.activeSessionId;
     this.state = {
       ...this.state,
@@ -1998,7 +2058,7 @@ export class AssistantDaemon {
         await this.gateway.sendChoice(this.state.boundChatId, session.paneId, current, session.agent);
       } else if (current.state === 'failed' && previous?.state !== 'failed') {
         await this.gateway.sendText(this.state.boundChatId, `${agentName} 检测到失败状态，请用 /tail 查看。`);
-      } else if (current.state === 'exited' && previous?.state !== 'exited') {
+      } else if (current.state === 'exited' && previous?.state !== 'exited' && !session.startupRecovery) {
         await this.gateway.sendText(this.state.boundChatId, `${agentName}/tmux pane 已退出。`);
       }
     } catch (error) {
@@ -2076,6 +2136,7 @@ export class AssistantDaemon {
       );
       return { ok: true };
     }
+    if (session.startupRecovery?.phase === 'interrupted') return { ok: true };
     if (session.startupRecovery?.phase === 'picker'
       || (session.startupRecovery?.phase === 'manual' && await this.readResumePicker(session))) {
       this.pendingAgentSessionClaims.set(candidate.sessionId, candidate);
@@ -2181,7 +2242,7 @@ export class AssistantDaemon {
   private async refreshNativeAgentSessionClaims(): Promise<void> {
     for (const session of Object.values(this.state.sessions ?? {})) {
       if (session.agentSessionId) continue;
-      if (session.startupRecovery?.phase === 'picker' || this.startupOperations?.has(session.id)) continue;
+      if (session.startupRecovery?.phase === 'picker' || session.startupRecovery?.phase === 'interrupted' || this.startupOperations?.has(session.id)) continue;
       const agentSessionId = await this.resolvePaneNativeAgentSessionId(session);
       if (!agentSessionId) continue;
       await this.handleAgentSessionStarted({
@@ -2415,6 +2476,7 @@ export class AssistantDaemon {
     const previousScreenState = this.previousScreen?.state;
     // Commit before logging/notifying: either can yield to an explicit switch.
     this.state = result.state;
+    await this.store.saveState(this.state);
     if (activeChanged) {
       this.screen = undefined;
       this.previousScreen = undefined;
@@ -2430,7 +2492,7 @@ export class AssistantDaemon {
         `session removed: session=${result.removedActive.id} agent=${result.removedActive.agent} pane=${result.removedActive.paneId} wasActive=true nextActive=${result.state.activeSessionId ?? '-'}`,
       );
     }
-    if (activeChanged && result.removedActive
+    if (activeChanged && result.removedActive && !result.removedActive.startupRecovery
       && previousScreenState !== 'exited' && this.state.boundChatId) {
       await this.gateway?.sendText(
         this.state.boundChatId,
@@ -2438,6 +2500,8 @@ export class AssistantDaemon {
       ).catch((error) => this.log(`exit notification failed: ${errorMessage(error)}`));
     }
     for (const removed of result.removedSessions) {
+      const interrupted = this.state.sessions?.[removed.session.id];
+      if (interrupted?.startupRecovery?.phase === 'interrupted' && this.interactionNotificationsSuppressed === 0) await this.sendStartupManual(interrupted);
       const exitStatus = removed.pane?.exitStatus;
       if (exitStatus === undefined || exitStatus === 0) continue;
       const terminalExcerpt = startupTerminalExcerpt(tailScreen(removed.terminalOutput ?? '', 80).slice(-3_000));
@@ -2464,6 +2528,7 @@ export class AssistantDaemon {
     }
     await this.store.saveState(this.state);
     if (activeChanged && result.removedActive?.startupRecovery
+      && this.state.sessions?.[result.removedActive.id]?.startupRecovery?.phase !== 'interrupted'
       && this.state.connectionRevision === input.connectionRevision) {
       await this.notifyStartupRollback(result.state.activeSessionId);
     }
@@ -2521,6 +2586,7 @@ export class AssistantDaemon {
 
   private async startRemoteSessionCore(
     request: StartSessionRequest,
+    connection?: { previous?: ManagedSession; revision: number },
   ): Promise<
     | { ok: true; state: 'ready'; session: ManagedSession }
     | { ok: true; state: 'manual'; session: ManagedSession }
@@ -2528,8 +2594,8 @@ export class AssistantDaemon {
     | { ok: true; state: 'conflict'; request: StartSessionRequest; owner: ManagedSession }
     | { ok: false; error: DaemonResult }
   > {
-    const previous = this.activeSession();
-    const revisionAtStart = this.state.connectionRevision ?? 0;
+    const previous = connection ? connection.previous : this.activeSession();
+    const revisionAtStart = connection?.revision ?? (this.state.connectionRevision ?? 0);
     await this.log(
       `remote session create requested: session=${request.sessionId} agent=${request.agent} resume=${request.resume?.mode ?? 'new'}`,
     );

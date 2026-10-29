@@ -340,6 +340,69 @@ describe.each(agents)('%s resume recovery', (agent) => {
   });
 });
 
+describe.each(agents)('%s interrupted startup', (agent) => {
+  function interrupted(h: ReturnType<typeof harness>) {
+    const value: ManagedSession = { ...session('new', '%old', agent), startupRecovery: {
+      phase: 'interrupted', resume: h.request.resume, terminalOutput: 'Upgrade finished; please restart', exitStatus: 0,
+    } };
+    h.internal.state.sessions!.new = value;
+    return value;
+  }
+  it('restarts the same request after exit, then returns to manual', async () => {
+    const h = harness(agent);
+    const value = interrupted(h);
+    const action = signed(value, 'retry-create', String(value.updatedAt), 'manual');
+    const result = await finish(h.internal.handleManualAction(action, event(action)));
+    expect(result).toMatchObject({ type: 'manual', view: { session: { id: 'new', agent, startupRecovery: { phase: 'manual', resume: h.request.resume } } } });
+    expect(h.internal.state.activeSessionId).toBe('new');
+    expect(h.tmux.killSession).toHaveBeenCalledWith(value.sessionName);
+    expect(h.tmux.create).toHaveBeenCalledTimes(1);
+  });
+  it('does not override a user switch during restart and prevents duplicate retries', async () => {
+    const h = harness(agent);
+    const value = interrupted(h);
+    let release!: () => void;
+    h.tmux.killSession.mockImplementationOnce(() => new Promise<undefined>((resolve) => { release = () => resolve(undefined); }));
+    const action = signed(value, 'retry-create', String(value.updatedAt), 'manual');
+    const retry = h.internal.handleManualAction(action, event(action));
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await h.internal.handleManualAction(action, event(action))).toMatchObject({ type: 'error' });
+    h.internal.state = { ...h.internal.state, connectionRevision: 5 };
+    release();
+    await finish(retry);
+    expect(h.internal.state.activeSessionId).toBe('previous');
+    expect(h.tmux.create).toHaveBeenCalledTimes(1);
+  });
+  it('shows saved output without changing connections or restarting', async () => {
+    const h = harness(agent);
+    const value = interrupted(h);
+    const action = signed(value, 'view-startup', String(value.updatedAt), 'manual');
+    expect(await h.internal.handleManualAction(action, event(action))).toMatchObject({ type: 'manual', view: { session: { startupRecovery: { terminalOutput: 'Upgrade finished; please restart' } } } });
+    expect(h.internal.state.activeSessionId).toBe('previous');
+    expect(h.tmux.create).not.toHaveBeenCalled();
+  });
+  it('rejects a stale retry and allows explicit cancellation', async () => {
+    const h = harness(agent);
+    const value = interrupted(h);
+    const stale = signed(value, 'retry-create', 'old', 'manual');
+    await h.internal.handleManualAction(stale, event(stale));
+    expect(h.tmux.create).not.toHaveBeenCalled();
+    const cancel = signed(value, 'cancel-create', String(value.updatedAt), 'manual');
+    expect(await h.internal.handleManualAction(cancel, event(cancel))).toMatchObject({ type: 'success' });
+    expect(h.internal.state.sessions!.new).toBeUndefined();
+    expect(h.internal.state.activeSessionId).toBe('previous');
+  });
+  it('keeps the interrupted record when a retry cannot launch', async () => {
+    const h = harness(agent);
+    const value = interrupted(h);
+    h.tmux.create.mockRejectedValueOnce(new Error('launch failed'));
+    const action = signed(value, 'retry-create', String(value.updatedAt), 'manual');
+    expect(await finish(h.internal.handleManualAction(action, event(action)))).toMatchObject({ type: 'manual' });
+    expect(h.internal.state.sessions!.new!.startupRecovery?.phase).toBe('interrupted');
+    expect(h.internal.state.activeSessionId).toBe('previous');
+  });
+});
+
 function session(id: string, paneId: string, agent: AgentId): ManagedSession {
   return { id, paneId, agent, sessionName: `lca-${id}`, cwd: '/tmp', agentVersion: 'test', updatedAt: 1 };
 }

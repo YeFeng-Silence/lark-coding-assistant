@@ -24,6 +24,76 @@ afterEach(async () => {
 });
 
 describe.runIf(await hasTmux())('daemon bridge integration', () => {
+  it.each(['codex', 'traex', 'claude'] as const)('recovers %s after a simulated upgrade exits the real tmux process', async (agent) => {
+    const root = await mkdtemp(join(tmpdir(), 'lca-upgrade-test-'));
+    const paths = resolveAppPaths(root);
+    const store = new AppStore(paths);
+    const binary = join(root, 'fake-agent.mjs');
+    await writeFile(binary, `#!/usr/bin/env node
+import { existsSync, writeFileSync } from 'node:fs';
+import { createInterface } from 'node:readline';
+if (process.argv.includes('--version')) { console.log('test-agent 1.0'); process.exit(0); }
+const marker = ${JSON.stringify(join(root, 'upgrade-complete'))};
+const needsUpgrade = process.env.LARK_CODING_ASSISTANT_SESSION_ID === 'upgrade' && !existsSync(marker);
+if (needsUpgrade) console.log('Upgrade required. Press Enter to install.');
+else process.stdout.write('› ');
+createInterface({ input: process.stdin }).on('line', () => {
+  if (needsUpgrade) {
+    writeFileSync(marker, 'done');
+    console.log('Upgrade completed. Restart the agent.');
+    process.exit(0);
+  }
+  process.stdout.write('› ');
+});
+`);
+    await chmod(binary, 0o755);
+    await store.ensure();
+    await store.saveConfig({ tenant: 'feishu', appId: 'cli_test', tmuxBinary: 'tmux',
+      agentBinaries: { codex: binary, traex: binary, claude: binary }, pollIntervalMs: 50, workspaceRoots: [] });
+    await store.saveSecrets({ appSecret: 'test', callbackSecret: 'test' });
+    await store.saveState({ schemaVersion: 2, ownerOpenId: 'ou_owner', boundChatId: 'oc_owner', sessions: {}, updatedAt: Date.now() });
+    const gateway = new FakeGateway();
+    const prefix = `lca-upgrade-test-${agent}-${process.pid}-${Date.now()}`;
+    const daemon = new AssistantDaemon(store, paths, (_config, _secrets, handler) => {
+      gateway.handler = handler;
+      return gateway;
+    }, prefix);
+    cleanups.push(async () => {
+      await daemon.close().catch(() => undefined);
+      for (const id of ['previous', 'upgrade']) await runFile('tmux', ['kill-session', '-t', `=${prefix}-${id}`]).catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    });
+    await daemon.start();
+    expect((await requestDaemon(paths.socket, { method: 'start', sessionId: 'previous', agent, cwd: root })).ok).toBe(true);
+    const created = await gateway.emitSignedFormAction({
+      v: 1, kind: 'session-create', agent, action: 'submit', paneId: '', fingerprint: 'create',
+      chatId: 'oc_owner', nonce: 'upgrade-create', expiresAt: Date.now() + 60_000, sig: 'test',
+    }, { session_name: 'upgrade', session_agent: agent, session_cwd: root, session_resume: 'new' });
+    expect(created).toMatchObject({ type: 'manual' });
+    const manual = created as Extract<LarkActionResult, { type: 'manual' }>;
+    const confirm: SignedAction = { v: 1, kind: 'manual', manualMode: 'fallback', sessionId: 'upgrade', agent,
+      paneId: manual.view.session.paneId, fingerprint: manual.view.screen.fingerprint, action: 'enter',
+      chatId: 'oc_owner', nonce: 'upgrade-confirm', expiresAt: Date.now() + 60_000, sig: 'test' };
+    const notificationStart = gateway.texts.length;
+    const confirmed = await gateway.emitSignedFormAction(confirm, {});
+    await waitFor(async () => (await store.loadState()).sessions?.upgrade?.startupRecovery?.phase === 'interrupted');
+    const state = await store.loadState();
+    expect(state.activeSessionId).toBe('previous');
+    expect(state.sessions?.upgrade?.startupRecovery).toMatchObject({ phase: 'interrupted', exitStatus: 0,
+      terminalOutput: expect.stringContaining('Upgrade completed') });
+    expect(confirmed).toMatchObject({ type: 'manual', view: { session: { startupRecovery: { phase: 'interrupted' } } } });
+    expect(gateway.texts.slice(notificationStart).some(({ text }) => /tmux pane 已退出|新 Session 未完成创建/.test(text))).toBe(false);
+    expect(confirmed).toMatchObject({ view: { notice: expect.stringContaining('previous') } });
+    const retained = state.sessions!.upgrade!;
+    const retried = await gateway.emitSignedFormAction({ ...confirm, action: 'retry-create', nonce: 'upgrade-retry',
+      fingerprint: String(retained.updatedAt) }, {});
+    expect(retried).toMatchObject({ type: 'session-created', session: { id: 'upgrade', agent, startupRecovery: undefined } });
+    const ready = await store.loadState();
+    expect(ready.activeSessionId).toBe('upgrade');
+    expect(ready.sessions!.upgrade!.paneId).not.toBe(retained.paneId);
+    expect(ready.sessions!.previous).toBeDefined();
+  }, 20_000);
+
   it('binds one private owner and forwards ordinary messages into the managed pane', async () => {
     const root = await mkdtemp(join(tmpdir(), 'lca-daemon-'));
     const previousHome = process.env.HOME;
