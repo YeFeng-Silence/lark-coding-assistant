@@ -328,6 +328,7 @@ function manualButtonRow(buttons: object[]): object {
 }
 
 export function statusCard(status: RuntimeStatus): object {
+  const updateSummary = `**LCA 版本** ${escapeMarkdown(status.daemonVersion ?? '未知')}\n**更新状态** ${escapeMarkdown(status.update?.message ?? '暂无更新任务')}`;
   const session = status.session;
   if (!session) {
     return {
@@ -338,7 +339,7 @@ export function statusCard(status: RuntimeStatus): object {
         padding: '12px',
         elements: [{
           tag: 'markdown',
-          content: `⚪ **暂无 active session**\n\n当前共有 ${Object.keys(status.state.sessions ?? {}).length} 个可用 session，可发送 /sessions 进行选择。`,
+          content: `${updateSummary}\n\n⚪ **暂无 active session**\n\n当前共有 ${Object.keys(status.state.sessions ?? {}).length} 个可用 session，可发送 /sessions 进行选择。`,
         }],
       },
     };
@@ -378,7 +379,7 @@ export function statusCard(status: RuntimeStatus): object {
             elements: [{ tag: 'markdown', content: `**工作目录**\n\`${escapeInlineCode(path)}\`` }],
           }],
         },
-        { tag: 'markdown', content: `**版本**  \`${escapeInlineCode(session.agentVersion)}\`\n**飞书连接**  ${status.state.boundChatId ? '已绑定' : '未绑定'}` },
+        { tag: 'markdown', content: `${updateSummary}\n**Agent 版本**  \`${escapeInlineCode(session.agentVersion)}\`\n**飞书连接**  ${status.state.boundChatId ? '已绑定' : '未绑定'}` },
       ],
     },
   };

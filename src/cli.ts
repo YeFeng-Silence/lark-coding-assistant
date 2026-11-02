@@ -1,3 +1,4 @@
+import { launchMaintenance, readUpdateStatus } from './update/manager.js';
 import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
@@ -35,6 +36,11 @@ const packageInfo = JSON.parse(
 
 program.name('lark-coding-assistant').version(packageInfo.version);
 
+program.command('update').description('Install the latest stable version and restart the daemon').action(async () => {
+  await ensureInitialized();
+  await launchMaintenance(paths, 'update');
+  console.log('升级任务已启动，完成后自动重启 daemon。使用 lca status 查看结果。');
+});
 program.command('init').description('Configure Feishu/Lark PersonalAgent').action(runInit);
 program.command('start')
   .option('-n, --name <name>', 'Session name', 'default')
@@ -303,6 +309,7 @@ async function runStatus(name?: string): Promise<void> {
     ]);
     if (!response.ok) throw new Error(response.error);
     const runtime = response.value as RuntimeStatus;
+    if (runtime.update) console.log(`更新：${runtime.update.phase} · ${runtime.update.message}`);
     console.log(formatCliStatus({
       daemon: health.status === 'running'
         ? { status: 'running', pid: health.info.pid, version: health.info.version }
@@ -315,6 +322,8 @@ async function runStatus(name?: string): Promise<void> {
     }));
   } catch {
     const [state, health] = await Promise.all([store.loadState(), daemonHealth(paths)]);
+    const update = await readUpdateStatus(paths);
+    if (update) console.log(`更新：${update.phase} · ${update.message}`);
     console.log(formatCliStatus({
       daemon: health.status === 'running'
         ? { status: 'running', pid: health.info.pid, version: health.info.version }

@@ -23,6 +23,13 @@ describe('CardKit 2 cards', () => {
     for (const column of columns) expect(signer.verify(column.elements[0].behaviors[0].value, 'oc_1')).toBeDefined();
   });
 
+  it('shows daemon version and update progress even without an active session', () => {
+    const card = JSON.stringify(statusCard({ state: { schemaVersion: 2, updatedAt: 1 }, paneAlive: false,
+      daemonVersion: '0.2.11', update: { phase: 'installing', message: '正在安装 0.2.12', updatedAt: 1 } }));
+    const text = JSON.parse(card).body.elements[0].content.split(String.fromCharCode(92)).join('');
+    expect(text).toContain('0.2.11');
+    expect(text).toContain('正在安装 0.2.12');
+  });
   it('uses new-session progress text for a manual startup without resume', () => {
     const serialized = JSON.stringify(manualControlCard('oc_1', {
       session: { id: 'pending', agent: 'codex', sessionName: 'lca-pending', paneId: '%4', cwd: '/work',
