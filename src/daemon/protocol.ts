@@ -6,6 +6,7 @@ import type { StartSessionRequest } from '../session/start-request.js';
 
 export type DaemonRequest =
   | { id: string; method: 'ping' }
+  | { id: string; method: 'maintenanceComplete'; message: string }
   | { id: string; method: 'shutdown' }
   | ({ id: string; method: 'start' } & StartSessionRequest)
   | { id: string; method: 'reconcile' }
@@ -36,6 +37,8 @@ export interface DaemonInfo {
 }
 
 export interface RuntimeStatus {
+  daemonVersion?: string;
+  update?: import('../update/manager.js').UpdateStatus;
   state: SessionState;
   session?: ManagedSession;
   screen?: ScreenDetection;

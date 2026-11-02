@@ -1,3 +1,4 @@
+import { launchMaintenance, readUpdateStatus } from '../update/manager.js';
 import { appendFile, chmod, open, readFile, rm } from 'node:fs/promises';
 import { createServer, type Socket } from 'node:net';
 import { basename } from 'node:path';
@@ -215,6 +216,9 @@ export class AssistantDaemon {
 
   private async dispatch(request: DaemonRequest): Promise<DaemonResult> {
     switch (request.method) {
+      case 'maintenanceComplete':
+        if (this.state.boundChatId) await this.gateway?.sendText(this.state.boundChatId, request.message);
+        return { ok: true };
       case 'ping': return { ok: true, value: { version: this.appVersion, pid: process.pid } };
       case 'shutdown': {
         setTimeout(() => void this.close(), 25);
@@ -533,6 +537,8 @@ export class AssistantDaemon {
       : undefined;
     return {
       state: this.state,
+      daemonVersion: this.appVersion,
+      update: await readUpdateStatus(this.paths),
       session: selected,
       screen: selectedRuntime?.screen,
       paneAlive: selectedRuntime?.paneAlive === true,
@@ -598,6 +604,13 @@ export class AssistantDaemon {
     }
     if (message.senderId !== this.state.ownerOpenId || message.chatId !== this.state.boundChatId) return;
 
+    if (text === '/update' || text === '/restart') {
+      try {
+        await this.gateway?.sendText(message.chatId, text === '/update' ? '正在检查并升级，完成后自动重启 daemon。' : '正在重启 daemon，现有会话将保留。');
+        await launchMaintenance(this.paths, text === '/update' ? 'update' : 'restart');
+      } catch (error) { await this.gateway?.sendText(message.chatId, errorMessage(error)); }
+      return;
+    }
     if (text === '/start') {
       try {
         await this.gateway?.sendSessionCreate(message.chatId, await this.createSessionWorkspaceView(message.chatId));
