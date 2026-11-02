@@ -46,7 +46,6 @@ program.command('update').description('Install the latest stable version and res
       console.log('升级任务已启动，完成后自动重启 daemon。使用 lca status 查看结果。');
       return;
     }
-    console.log('升级任务已启动，正在等待结果（Ctrl+C 只退出等待，后台任务继续）。');
     const result = await waitForMaintenance(paths, pid, (status) => console.log(status.message));
     if (result.phase === 'failed') process.exitCode = 1;
   });
