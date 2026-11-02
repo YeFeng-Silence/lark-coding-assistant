@@ -1,3 +1,4 @@
+import { waitForMaintenance } from './update/wait.js';
 import { launchMaintenance, readUpdateStatus } from './update/manager.js';
 import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -36,11 +37,19 @@ const packageInfo = JSON.parse(
 
 program.name('lark-coding-assistant').version(packageInfo.version);
 
-program.command('update').description('Install the latest stable version and restart the daemon').action(async () => {
-  await ensureInitialized();
-  await launchMaintenance(paths, 'update');
-  console.log('升级任务已启动，完成后自动重启 daemon。使用 lca status 查看结果。');
-});
+program.command('update').description('Install the latest stable version and restart the daemon')
+  .option('--background', 'Run in the background and return immediately')
+  .action(async (options: { background?: boolean }) => {
+    await ensureInitialized();
+    const pid = await launchMaintenance(paths, 'update');
+    if (options.background) {
+      console.log('升级任务已启动，完成后自动重启 daemon。使用 lca status 查看结果。');
+      return;
+    }
+    console.log('升级任务已启动，正在等待结果（Ctrl+C 只退出等待，后台任务继续）。');
+    const result = await waitForMaintenance(paths, pid, (status) => console.log(status.message));
+    if (result.phase === 'failed') process.exitCode = 1;
+  });
 program.command('init').description('Configure Feishu/Lark PersonalAgent').action(runInit);
 program.command('start')
   .option('-n, --name <name>', 'Session name', 'default')

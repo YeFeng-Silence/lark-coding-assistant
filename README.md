@@ -225,7 +225,7 @@ Agent 原生 `Stop` hook 提供候选结论；daemon 仅在 active pane 回到 `
 
 ## 升级与卸载
 
-通过 npm 全局安装后，运行 `lca update`，或在绑定的飞书私聊发送 `/update`，会检查并安装 npm 最新稳定版，成功后自动重启 daemon。已是最新版本时不会重启。任务在后台执行，可通过 `lca status` 或飞书 `/status` 查看当前 daemon 版本与更新状态；飞书会在任务完成后收到结果。
+通过 npm 全局安装后，运行 `lca update`，或在绑定的飞书私聊发送 `/update`，会检查并安装 npm 最新稳定版，成功后自动重启 daemon。已是最新版本时不会重启。`lca update` 默认显示阶段进度并等待结果，成功退出码为 0、失败为 1；`lca update --background` 启动后台任务后立即返回。Ctrl+C 只结束等待，后台升级继续。可通过 `lca status` 或飞书 `/status` 查看当前 daemon 版本与更新状态；飞书会在任务完成后收到结果。
 
 飞书 `/restart` 只重启 daemon。升级和重启保留 coding-agent/tmux 会话与连接记录；飞书连接会短暂重连。升级安装失败时保留运行中的 daemon 并尝试恢复旧安装包，新 daemon 启动失败时尝试回滚旧版本。源码运行和 npm link 不执行全局升级，可使用 `/restart`。
 

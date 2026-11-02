@@ -18,7 +18,7 @@ export async function writeUpdateStatus(paths: AppPaths, status: UpdateStatus): 
   await writeFile(file + '.tmp', JSON.stringify(status), { mode: 0o600 });
   await rename(file + '.tmp', file);
 }
-export async function launchMaintenance(paths: AppPaths, action: 'update' | 'restart'): Promise<void> {
+export async function launchMaintenance(paths: AppPaths, action: 'update' | 'restart'): Promise<number> {
   await mkdir(paths.runtimeDir, { recursive: true, mode: 0o700 });
   await mkdir(paths.logsDir, { recursive: true, mode: 0o700 });
   const lock = join(paths.runtimeDir, 'update.lock');
@@ -46,6 +46,7 @@ export async function launchMaintenance(paths: AppPaths, action: 'update' | 'res
     await ready;
     await writeFile(join(lock, 'pid'), String(child.pid));
     child.unref();
+    return child.pid!;
   } catch (error) { await rm(lock, { recursive: true, force: true }); throw error; }
 }
 
