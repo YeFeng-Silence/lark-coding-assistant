@@ -167,7 +167,9 @@ lca attach web
 - `/key up|down|left|right|enter|esc|tab|space|backspace|ctrl-c`：向当前终端发送一个手动按键。
 - `/type <文本>`：向当前终端输入文本但不提交。
 - `/submit <文本>`：向当前终端输入文本并按一次 Enter。
-- `/status`：显示当前 session、agent、tmux pane、画面状态和工作目录。
+- `/status`：显示 daemon 版本、更新状态，以及当前 session、agent、tmux pane、画面状态和工作目录。
+- `/update`：检查并升级到 npm 最新稳定版，成功后自动重启 daemon，并通知结果。
+- `/restart`：只重启 daemon，保留现有 agent 和 tmux session。
 - `/detach`：解除当前私聊绑定，agent 与 tmux 继续运行。
 - `/stop`：发送二次确认卡，确认后关闭当前 agent 和 tmux session。
 - `/attach <code>`：使用一次性绑定码重新绑定私聊。
@@ -180,6 +182,8 @@ lca attach web
 lca start [--name <name>] [--agent codex|traex|claude] [--cwd <path>] [--resume [session-id]|--resume-last|--resume-all]
 lca attach [name]
 lca status [name]
+lca update                # 升级并自动重启 daemon，等待并显示结果
+lca update --background   # 后台升级，立即返回
 lca stop [name]
 lca bind-code
 lca reset-owner
@@ -225,15 +229,24 @@ Agent 原生 `Stop` hook 提供候选结论；daemon 仅在 active pane 回到 `
 
 ## 升级与卸载
 
-通过 npm 全局安装后，运行 `lca update`，或在绑定的飞书私聊发送 `/update`，会检查并安装 npm 最新稳定版，成功后自动重启 daemon。已是最新版本时不会重启。`lca update` 默认显示阶段进度并等待结果，成功退出码为 0、失败为 1；`lca update --background` 启动后台任务后立即返回。Ctrl+C 只结束等待，后台升级继续。可通过 `lca status` 或飞书 `/status` 查看当前 daemon 版本与更新状态；飞书会在任务完成后收到结果。
-
-飞书 `/restart` 只重启 daemon。升级和重启保留 coding-agent/tmux 会话与连接记录；飞书连接会短暂重连。升级安装失败时保留运行中的 daemon 并尝试恢复旧安装包，新 daemon 启动失败时尝试回滚旧版本。源码运行和 npm link 不执行全局升级，可使用 `/restart`。
-
-手动升级仍可使用：
-
+日常升级推荐直接使用：
 
 ```bash
-npm install -g lark-coding-assistant@latest
+lca update
+```
+
+该命令检查并安装 npm 最新稳定版，成功后自动重启 daemon，无需再执行 `lca daemon restart`。默认显示检查、安装、重启和最终结果；成功退出码为 0，失败为 1。已是最新版本时不会重启。
+
+需要后台执行时使用 `lca update --background`，通过 `lca status` 查看结果。默认等待模式下，Ctrl+C 只结束等待，后台升级继续。
+
+也可在绑定的飞书私聊发送 `/update`，完成后会收到结果通知；发送 `/status` 查看 daemon 版本及更新状态。`/restart` 只重启 daemon。
+
+升级和重启保留 coding-agent/tmux 会话与连接记录；飞书连接会短暂重连。升级安装失败时保留运行中的 daemon 并尝试恢复旧安装包，新 daemon 启动失败时尝试回滚旧版本。源码运行和 npm link 不执行全局升级，可使用 `/restart`。
+
+0.2.10 及更早版本尚无 `update` 命令，首次迁移需要手动安装并重启一次，之后使用 `lca update`：
+
+```bash
+npm install -g lark-coding-assistant@latest --registry=https://registry.npmjs.org
 lca daemon restart
 ```
 
