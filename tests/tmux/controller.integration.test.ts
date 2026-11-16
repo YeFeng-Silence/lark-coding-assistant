@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -76,6 +76,51 @@ describe.runIf(await hasTmux())('TmuxController integration', () => {
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
+  });
+
+  it('preserves a multiline bracketed paste and submits once outside the TUI suppression window', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'lca-paste-'));
+    const fixture = join(directory, 'paste.mjs');
+    const resultFile = join(directory, 'result.json');
+    await writeFile(fixture, `
+import { writeFileSync } from 'node:fs';
+process.stdin.setRawMode(true);
+process.stdin.setEncoding('utf8');
+process.stdin.resume();
+process.stdout.write('\\x1b[?2004hREADY');
+let pending = '', pasted = '', pastedAt = 0, enters = 0, suppressed = 0;
+process.stdin.on('data', (chunk) => {
+  pending += chunk;
+  const begin = '\\x1b[200~', end = '\\x1b[201~';
+  if (pending.startsWith(begin)) {
+    const index = pending.indexOf(end);
+    if (index < 0) return;
+    pasted = pending.slice(begin.length, index);
+    pastedAt = Date.now();
+    pending = pending.slice(index + end.length);
+  }
+  for (const ch of pending) {
+    if (ch !== '\\r') continue;
+    enters++;
+    const elapsed = Date.now() - pastedAt;
+    if (elapsed < 120) suppressed++;
+    writeFileSync(${JSON.stringify(resultFile)}, JSON.stringify({ pasted, enters, suppressed, elapsed }));
+  }
+  pending = '';
+});
+`);
+    const sessionName = `lca-paste-${process.pid}-${Date.now()}`;
+    sessions.push(sessionName);
+    const tmux = new TmuxController();
+    try {
+      const pane = await tmux.create({ sessionName, cwd: directory, binary: process.execPath, args: [fixture] });
+      await waitFor(async () => (await tmux.capture(pane.paneId)).includes('READY'));
+      await tmux.sendText(pane.paneId, 'first line\n第二行');
+      await waitFor(async () => readFile(resultFile, 'utf8').then(() => true, () => false));
+      const result = JSON.parse(await readFile(resultFile, 'utf8'));
+      expect(result).toMatchObject({ pasted: 'first line\n第二行', enters: 1, suppressed: 0 });
+      expect(result.elapsed).toBeGreaterThanOrEqual(120);
+    } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
   it('preserves startup exit status and terminal output', async () => {
