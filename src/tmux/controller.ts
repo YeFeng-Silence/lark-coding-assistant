@@ -5,6 +5,9 @@ import type { TmuxCreateOptions, TmuxInspectResult, TmuxPane, TmuxSessionMetadat
 import { AppError } from '../core/errors.js';
 import { parseStartupRecovery } from '../session/startup-recovery.js';
 
+// TUI paste detection can briefly interpret Enter as a pasted newline.
+const PASTE_SUBMIT_DELAY_MS = 300;
+
 const PANE_FORMAT = '#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_start_command}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_dead}\t#{pane_dead_status}\t#{cursor_x}\t#{cursor_y}';
 const METADATA_OPTIONS = {
   managed: '@lca-managed',
@@ -180,11 +183,14 @@ export class TmuxController {
       const bufferName = `lca-${process.pid}-${randomBytes(6).toString('hex')}`;
       await runFileWithInput(this.binary, ['load-buffer', '-b', bufferName, '-'], text);
       try {
-        await runFile(this.binary, ['paste-buffer', '-b', bufferName, '-d', '-t', paneId]);
+        await runFile(this.binary, ['paste-buffer', '-p', '-r', '-b', bufferName, '-d', '-t', paneId]);
       } finally {
         await runFile(this.binary, ['delete-buffer', '-b', bufferName]).catch(() => undefined);
       }
-      if (submit) await runFile(this.binary, ['send-keys', '-t', paneId, 'Enter']);
+      if (submit) {
+        await new Promise((resolve) => setTimeout(resolve, PASTE_SUBMIT_DELAY_MS));
+        await runFile(this.binary, ['send-keys', '-t', paneId, 'Enter']);
+      }
     };
     this.writes = this.writes.then(operation, operation);
     return this.writes;
